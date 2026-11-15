@@ -105,21 +105,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          # softprops 只追加不清理：重跑会把旧 run 的残留产物永久留在 release 里。
-          # 因此发布前把同名 release 连同其全部产物整对象删除，让本次发布全新落盘。
-          RELEASE_ID=$(gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" --jq '.id' 2>/dev/null || true)
-          if [ -n "$RELEASE_ID" ]; then
-            echo "发现旧 release（id=$RELEASE_ID），连产物一起删除..."
-            gh api -X DELETE "repos/${{ github.repository }}/releases/$RELEASE_ID"
-            echo "已删除"
-          else
-            echo "无同名 release，全新发布"
-          fi
-          # 历史失败遗留的同 tag 草稿（softprops 中断产物）顺带清掉，容忍单个失败
-          DRAFT_IDS=$(gh api "repos/${{ github.repository }}/releases" --paginate --jq ".[] | select(.draft == true and .tag_name == \"${{ github.ref_name }}\") | .id" 2>/dev/null || true)
-          for rid in $DRAFT_IDS; do
-            echo "清理同 tag 草稿 release（id=$rid）..."
-            gh api -X DELETE "repos/${{ github.repository }}/releases/$rid" || true
+          # softprops 只追加不清理：重跑会把旧 run 残留产物永久留在 release 里。
+          # 发布前删除同名 release（连产物整对象删除），本次发布全新落盘。
+          # 防御：gh api 的错误 JSON 可能混入 stdout，id 必须严格为数字才执行删除。
+          RESP=$(gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" 2>/dev/null || true)
+          RELEASE_ID=$(printf '%s' "$RESP" | jq -r '.id // empty' 2>/dev/null || true)
+          case "$RELEASE_ID" in
+            ''|*[!0-9]*)
+              echo "无同名 release，全新发布"
+              ;;
+            *)
+              echo "发现旧 release（id=$RELEASE_ID），连产物一起删除..."
+              gh api -X DELETE "repos/${{ github.repository }}/releases/$RELEASE_ID"
+              echo "已删除"
+              ;;
+          esac
+          # 历史中断遗留的同 tag 草稿顺带清理，单个失败不阻塞发布
+          DRAFTS=$(gh api "repos/${{ github.repository }}/releases" --paginate 2>/dev/null \
+            | jq -r --arg tag "${{ github.ref_name }}" '.[] | select(.draft == true and .tag_name == $tag) | .id' 2>/dev/null || true)
+          for rid in $DRAFTS; do
+            case "$rid" in
+              *[!0-9]*|'') continue ;;
+              *) echo "清理同 tag 草稿 release（id=$rid）..."; gh api -X DELETE "repos/${{ github.repository }}/releases/$rid" || true ;;
+            esac
           done
 
       - name: Publish release
