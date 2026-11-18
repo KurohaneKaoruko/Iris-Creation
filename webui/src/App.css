@@ -1,0 +1,49 @@
+.startup-gate {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: var(--bg-primary);
+}
+
+.startup-card {
+  width: min(440px, 100%);
+  padding: 34px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow-md);
+  text-align: center;
+}
+
+.startup-mark {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 20px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-lg);
+  color: var(--accent);
+  background: var(--accent-weak);
+}
+
+.startup-mark.is-loading .icon { animation: startup-pulse 1.4s ease-in-out infinite; }
+.startup-mark.is-error { color: var(--warn); }
+.startup-eyebrow { color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: .16em; }
+.startup-card h1 { margin-top: 9px; font-size: 20px; font-weight: 650; }
+.startup-copy { margin: 10px 0 20px; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
+.startup-progress { height: 3px; overflow: hidden; border-radius: 2px; background: var(--track); }
+.startup-progress span { display: block; width: 0; height: 100%; background: var(--accent); transition: width .25s ease; }
+.startup-progress span.active { width: 65%; animation: startup-progress 1.5s ease-in-out infinite alternate; }
+.startup-detail { margin-top: 10px; color: var(--text-muted); font-size: 11px; }
+.startup-actions { display: flex; justify-content: center; align-items: center; gap: 14px; margin-top: 22px; }
+.startup-retry { display: inline-flex; align-items: center; gap: 7px; padding: 9px 14px; border-radius: var(--radius-sm); color: var(--accent-contrast); background: var(--accent); font-size: 12px; font-weight: 600; }
+.startup-retry:hover { background: var(--accent-hover); }
+.startup-copy-error { padding: 8px; color: var(--text-muted); font-size: 12px; }
+.startup-copy-error:hover { color: var(--text-primary); }
+
+@keyframes startup-pulse { 50% { opacity: .4; transform: scale(.94); } }
+@keyframes startup-progress { to { transform: translateX(52%); } }
+@media (prefers-reduced-motion: reduce) {
+  .startup-mark.is-loading .icon, .startup-progress span.active { animation: none; }
+}

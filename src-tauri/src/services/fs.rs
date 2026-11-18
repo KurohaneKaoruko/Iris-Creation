@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+static TEXT_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Serialize, Clone)]
 pub struct FsEntry {
@@ -618,7 +621,7 @@ fn sanitize_filename(name: &str) -> String {
 
 #[cfg(test)]
 mod export_tests {
-  use super::{sanitize_filename, strip_frontmatter_and_heading};
+  use super::{sanitize_filename, strip_frontmatter_and_heading, write_text_internal_with_baseline};
 
   #[test]
   fn strips_frontmatter_and_first_heading() {
@@ -635,6 +638,24 @@ mod export_tests {
     assert_eq!(sanitize_filename("我的 小说/v1?"), "我的 小说_v1_");
     assert_eq!(sanitize_filename("clean-name_2"), "clean-name_2");
   }
+
+  #[test]
+  fn guarded_write_preserves_external_version_when_editor_baseline_is_stale() {
+    let root = std::env::temp_dir().join(format!("iris-write-guard-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("stories")).unwrap();
+    let path = root.join("stories/chapter-0001.md");
+    std::fs::write(&path, "external edit").unwrap();
+    let result = write_text_internal_with_baseline(
+      &root, "stories/chapter-0001.md", "stale edit", false, "auto-save", Some("old version"),
+    );
+    assert!(result.unwrap_err().contains("changed on disk"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit");
+    write_text_internal_with_baseline(
+      &root, "stories/chapter-0001.md", "saved edit", false, "auto-save", Some("external edit"),
+    ).unwrap();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "saved edit");
+    std::fs::remove_dir_all(root).unwrap();
+  }
 }
 
 pub fn write_text(
@@ -642,8 +663,18 @@ pub fn write_text(
   relative_path: &str,
   content: &str,
 ) -> Result<(), String> {
+  write_text_with_baseline(state, relative_path, content, None)
+}
+
+/// 编辑器传入读取时的基线；磁盘有新修改时拒绝静默覆盖。
+pub fn write_text_with_baseline(
+  state: &AppState,
+  relative_path: &str,
+  content: &str,
+  expected_current: Option<&str>,
+) -> Result<(), String> {
   let root = get_workspace_root(state)?;
-  write_text_internal(&root, &relative_path, &content, false, "auto-save")
+  write_text_internal_with_baseline(&root, relative_path, content, false, "auto-save", expected_current)
 }
 
 pub(crate) fn write_text_internal(
@@ -653,9 +684,32 @@ pub(crate) fn write_text_internal(
   create_parent_dirs: bool,
   history_reason: &str,
 ) -> Result<(), String> {
+  write_text_internal_with_baseline(root, relative_path, content, create_parent_dirs, history_reason, None)
+}
+
+fn write_text_internal_with_baseline(
+  root: &Path,
+  relative_path: &str,
+  content: &str,
+  create_parent_dirs: bool,
+  history_reason: &str,
+  expected_current: Option<&str>,
+) -> Result<(), String> {
+  let _write_guard = TEXT_WRITE_LOCK.lock().map_err(|_| "file write lock is poisoned".to_string())?;
   let rel = validate_relative_path(relative_path)?;
   let target = root.join(rel);
   let rel_norm = relative_path.replace('\\', "/");
+
+  if let Some(expected) = expected_current {
+    let current = fs::read_to_string(&target).map_err(|e| {
+      if e.kind() == std::io::ErrorKind::NotFound {
+        "file changed on disk; file was removed before saving".to_string()
+      } else { format!("read current file failed: {e}") }
+    })?;
+    if current != expected {
+      return Err("file changed on disk; reload before saving or explicitly overwrite".to_string());
+    }
+  }
 
   if rel_norm == ".novel/.cache/outline.json" {
     let existing = if target.exists() {
@@ -802,4 +856,3 @@ fn build_tree(root: &Path, path: &Path, max_depth: usize) -> Result<FsEntry, Str
     })
   }
 }
-

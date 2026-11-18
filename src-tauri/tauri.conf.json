@@ -2,27 +2,34 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Iris-Creation",
   "version": "0.1.0",
-  "identifier": "com.iriscreation.app",
+  "identifier": "com.iriscreation.desktop",
   "build": {
     "beforeDevCommand": "pnpm --dir webui dev",
+    "devUrl": "http://localhost:1421",
     "beforeBuildCommand": "pnpm --dir webui build",
     "frontendDist": "../webui/dist"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Iris-Creation",
         "width": 1280,
         "height": 800,
         "resizable": true,
-        "decorations": false,
+        "minWidth": 800,
+        "minHeight": 560,
+        "decorations": true,
         "transparent": false,
-        "url": "http://127.0.0.1:8765/"
+        "visible": false
       }
     ]
   },
   "bundle": {
     "active": true,
+    "resources": {
+      "../webui/dist/": "frontend/"
+    },
     "targets": [
       "nsis",
       "dmg",
@@ -39,8 +46,7 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "currentUser",
-        "installerHooks": "installer-hooks.nsh"
+        "installMode": "currentUser"
       }
     }
   }

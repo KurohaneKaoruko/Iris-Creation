@@ -155,6 +155,8 @@ export const exportWork = (format: 'md' | 'txt' = 'md') =>
   rpc<{ filename: string; content: string }>('export_work', { format })
 export const writeText = (relativePath: string, content: string) =>
   rpc<void>('write_text', { relativePath, content })
+export const writeTextIfCurrent = (relativePath: string, content: string, expectedCurrent: string) =>
+  rpc<void>('write_text_if_current', { relativePath, content, expectedCurrent })
 export const createFile = (relativePath: string) => rpc<void>('create_file', { relativePath })
 export const createDir = (relativePath: string) => rpc<void>('create_dir', { relativePath })
 export const deleteEntry = (relativePath: string) => rpc<void>('delete_entry', { relativePath })

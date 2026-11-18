@@ -140,6 +140,16 @@ pub fn write_text(
 }
 
 #[tauri::command]
+pub fn write_text_if_current(
+  state: State<'_, AppState>,
+  relative_path: String,
+  content: String,
+  expected_current: String,
+) -> Result<(), String> {
+  crate::services::fs::write_text_with_baseline(&state, &relative_path, &content, Some(&expected_current))
+}
+
+#[tauri::command]
 pub fn create_novel_work(name: String, description: Option<String>) -> Result<ProjectItem, String> {
   crate::services::bookshelf::create_novel_project(&name, description)
 }

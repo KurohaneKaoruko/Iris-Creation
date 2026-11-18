@@ -105,11 +105,7 @@ fn save_external_projects(records: &[ExternalProjectRecord]) -> Result<(), Strin
 }
 
 fn default_projects_root() -> Result<PathBuf, String> {
-  let exe = std::env::current_exe().map_err(|e| format!("resolve current executable failed: {e}"))?;
-  let install_dir = exe
-    .parent()
-    .ok_or_else(|| "resolve install directory failed".to_string())?;
-  Ok(install_dir.join("projects"))
+  Ok(app_data::storage_root_dir()?.join("projects"))
 }
 
 fn is_valid_workspace_root(path: &Path) -> bool {
@@ -286,7 +282,20 @@ fn parse_launch_mode(mode: &str) -> Result<app_settings::LaunchMode, String> {
 
 pub fn get_project_picker_state() -> Result<ProjectPickerState, String> {
   let default_root = default_projects_root()?;
-  let default_projects = list_default_projects(&default_root)?;
+  let mut default_projects = list_default_projects(&default_root)?;
+  let data_root = app_data::storage_root_dir()?;
+  let exe = std::env::current_exe().ok();
+  for legacy in crate::desktop::legacy_data_dirs(&data_root, exe.as_deref().and_then(|path| path.parent())) {
+    let root = legacy.join("projects");
+    if root.is_dir() {
+      // 旧目录不可读时保留新书架可用，不让一个历史路径阻断整个启动页。
+      if let Ok(projects) = list_default_projects(&root) {
+        for project in projects {
+          if !default_projects.iter().any(|known| known.path == project.path) { default_projects.push(project); }
+        }
+      }
+    }
+  }
   let settings = app_settings::load()?;
   let last_workspace = get_last_workspace()?;
 

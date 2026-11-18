@@ -11,17 +11,18 @@
 use crate::event_sink::{BroadcastEventSink, SharedEventSink};
 use crate::state::AppState;
 use axum::{
-  Router,
   extract::{Path, State, WebSocketUpgrade},
   http::{HeaderMap, StatusCode},
   response::IntoResponse,
   routing::{get, post},
+  Router,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct ServerConfig {
   pub host: String,
   pub port: u16,
@@ -47,7 +48,7 @@ pub struct ServerContext {
   pub broadcast: BroadcastEventSink,
 }
 
-pub async fn run(config: ServerConfig) -> Result<(), String> {
+async fn prepare(config: ServerConfig) -> Result<(tokio::net::TcpListener, Router), String> {
   if let Some(dir) = &config.data_dir {
     crate::app_data::set_storage_root_override(dir.clone());
   }
@@ -56,52 +57,79 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
     .parse()
     .map_err(|e| format!("invalid bind address: {e}"))?;
 
+  let dist_dir = config
+    .static_dir
+    .clone()
+    .or_else(|| {
+      std::env::var("IRIS_CREATION_STATIC_DIR")
+        .ok()
+        .map(PathBuf::from)
+    })
+    .unwrap_or_else(|| PathBuf::from("../webui/dist"));
+
+  let index_file = dist_dir.join("index.html");
+  if config.static_dir.is_some() && !index_file.is_file() {
+    return Err(format!(
+      "frontend index.html not found: {}",
+      index_file.display()
+    ));
+  }
+  // 先解析静态资源并 bind；端口冲突不能污染进程级 OnceLock 事件总线。
+  let listener = tokio::net::TcpListener::bind(addr)
+    .await
+    .map_err(|e| format!("bind {addr} failed: {e}"))?;
+
   let broadcast = BroadcastEventSink::new(256);
-  // fs_watcher 等经 global sink 发射的事件也进 WS 广播
   crate::event_sink::global::init(Arc::new(broadcast.clone()));
   let ctx = ServerContext {
     app_state: Arc::new(AppState::default()),
     event_sink: Arc::new(broadcast.clone()),
     broadcast,
   };
-
-  let dist_dir = config
-    .static_dir
-    .clone()
-    .or_else(|| std::env::var("IRIS_CREATION_STATIC_DIR").ok().map(PathBuf::from))
-    .unwrap_or_else(|| PathBuf::from("../webui/dist"));
-
-  let index_file = dist_dir.join("index.html");
   let serve_frontend = tower_http::services::ServeDir::new(&dist_dir)
     // 用 fallback（而非 not_found_service）：后者会把响应状态强制覆盖为 404，
     // SPA 路由需要 200 + index.html。缓存头由下方 Router 中间件统一附加。
-    .fallback(tower::service_fn(move |req: axum::http::Request<axum::body::Body>| {
-      // SPA fallback：非 API/WS 路径全部回退到 index.html
-      let index = index_file.clone();
-      let is_api = req.uri().path().starts_with("/api/") || req.uri().path() == "/ws";
-      async move {
-        if is_api {
-          return Ok::<_, std::convert::Infallible>(
-            axum::http::Response::builder()
-              .status(StatusCode::NOT_FOUND)
-              .body(axum::body::Body::from("not found"))
-              .unwrap(),
-          );
+    .fallback(tower::service_fn(
+      move |req: axum::http::Request<axum::body::Body>| {
+        // SPA fallback：非 API/WS 路径全部回退到 index.html
+        let index = index_file.clone();
+        let path = req.uri().path();
+        let is_api = path.starts_with("/api/") || path == "/ws";
+        let is_asset = path.starts_with("/assets/")
+          || path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.contains('.'));
+        async move {
+          if is_api || is_asset {
+            return Ok::<_, std::convert::Infallible>(
+              axum::http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(axum::body::Body::from("not found"))
+                .unwrap(),
+            );
+          }
+          match tokio::fs::read(&index).await {
+            Ok(bytes) => Ok(
+              axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/html; charset=utf-8")
+                .header("cache-control", "no-cache")
+                .body(axum::body::Body::from(bytes))
+                .unwrap(),
+            ),
+            Err(_) => Ok(
+              axum::http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(axum::body::Body::from(
+                  "frontend dist not built (run pnpm run build first)",
+                ))
+                .unwrap(),
+            ),
+          }
         }
-        match tokio::fs::read(&index).await {
-          Ok(bytes) => Ok(axum::http::Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/html; charset=utf-8")
-            .header("cache-control", "no-cache")
-            .body(axum::body::Body::from(bytes))
-            .unwrap()),
-          Err(_) => Ok(axum::http::Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(axum::body::Body::from("frontend dist not built (run pnpm run build first)"))
-            .unwrap()),
-        }
-      }
-    }));
+      },
+    ));
 
   let app = Router::new()
     .route("/api/health", get(health))
@@ -117,7 +145,7 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
         if path.starts_with("/api/") || path == "/ws" {
           return Ok::<_, std::convert::Infallible>(res);
         }
-        let value = if path.starts_with("/assets/") {
+        let value = if path.starts_with("/assets/") && res.status().is_success() {
           // 带内容哈希的文件名：内容变→文件名变，可安全长缓存
           axum::http::HeaderValue::from_static("public, max-age=31536000, immutable")
         } else {
@@ -129,14 +157,30 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
       },
     ));
 
-  let listener = tokio::net::TcpListener::bind(addr)
-    .await
-    .map_err(|e| format!("bind {addr} failed: {e}"))?;
-  println!(
-    "[iris-creation-server] listening on http://{}  (static: {})",
-    addr,
-    dist_dir.display()
-  );
+  Ok((listener, app))
+}
+
+/// 绑定并启动内嵌服务，返回实际地址；桌面端用端口 0 避免与其他应用冲突。
+pub async fn start(config: ServerConfig) -> Result<SocketAddr, String> {
+  let (listener, app) = prepare(config).await?;
+  let addr = listener
+    .local_addr()
+    .map_err(|e| format!("read bound address failed: {e}"))?;
+  tokio::spawn(async move {
+    if let Err(e) = axum::serve(listener, app).await {
+      eprintln!("[iris-creation-server] server stopped: {e}");
+    }
+  });
+  Ok(addr)
+}
+
+/// 独立服务端一直运行，直到进程退出。
+pub async fn run(config: ServerConfig) -> Result<(), String> {
+  let (listener, app) = prepare(config).await?;
+  let addr = listener
+    .local_addr()
+    .map_err(|e| format!("read bound address failed: {e}"))?;
+  println!("[iris-creation-server] listening on http://{addr}");
   axum::serve(listener, app)
     .await
     .map_err(|e| format!("server error: {e}"))
@@ -162,7 +206,7 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
   fn url_host_is_local(url: &str) -> bool {
     // 从 origin URL 中取出 host 部分（scheme://host[:port]/），再按本机 host 判定
     let after_scheme = url.split("://").nth(1).unwrap_or("");
-    let host = after_scheme.split(['/','?','#']).next().unwrap_or("");
+    let host = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
     host_is_local(host)
   }
   // Host header 必须是本机
@@ -187,7 +231,10 @@ async fn rpc(
   body: axum::body::Bytes,
 ) -> impl IntoResponse {
   if !origin_allowed(&headers) {
-    return (StatusCode::FORBIDDEN, json!({"error": "forbidden origin"}).to_string());
+    return (
+      StatusCode::FORBIDDEN,
+      json!({"error": "forbidden origin"}).to_string(),
+    );
   }
   let args: Value = if body.is_empty() {
     json!({})
@@ -282,15 +329,27 @@ mod origin_tests {
   fn local_origins_pass() {
     assert!(origin_allowed(&headers(&[])));
     assert!(origin_allowed(&headers(&[("host", "127.0.0.1:8765")])));
-    assert!(origin_allowed(&headers(&[("host", "127.0.0.1:8765"), ("origin", "http://127.0.0.1:1421")])));
-    assert!(origin_allowed(&headers(&[("host", "localhost:8765"), ("origin", "http://localhost:1421")])));
-    assert!(origin_allowed(&headers(&[("host", "[::1]:8765"), ("origin", "http://[::1]:1421")])));
+    assert!(origin_allowed(&headers(&[
+      ("host", "127.0.0.1:8765"),
+      ("origin", "http://127.0.0.1:1421")
+    ])));
+    assert!(origin_allowed(&headers(&[
+      ("host", "localhost:8765"),
+      ("origin", "http://localhost:1421")
+    ])));
+    assert!(origin_allowed(&headers(&[
+      ("host", "[::1]:8765"),
+      ("origin", "http://[::1]:1421")
+    ])));
   }
 
   #[test]
   fn foreign_hosts_rejected() {
     assert!(!origin_allowed(&headers(&[("host", "evil.com")])));
-    assert!(!origin_allowed(&headers(&[("host", "127.0.0.1:8765"), ("origin", "https://evil.com")])));
+    assert!(!origin_allowed(&headers(&[
+      ("host", "127.0.0.1:8765"),
+      ("origin", "https://evil.com")
+    ])));
   }
 
   #[test]

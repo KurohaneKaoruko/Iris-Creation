@@ -127,9 +127,29 @@
   min-width: 0;
 }
 
+/* 给正文留出更舒展的阅读宽度；面板可折叠，窄屏自动改抽屉。 */
+.agw-file-body > .mdv { max-width: 900px; margin: 0 auto; padding: 26px clamp(22px, 5vw, 72px); font-size: 15px; line-height: 1.95; }
+.agw-mobile-close { display: none; }
+.agw-mobile-scrim { display: none; }
+
+.agw-focus-toggle.active { color: var(--accent); background: var(--accent-weak); }
+.agw-focus-mode .agw-focus-toggle { display: inline-flex; }
+.agw-focus-exit { display: none; }
+.agw-focus-mode .agw-head > :not(.agw-name):not(.agw-focus-toggle) { display: none; }
+.agw-focus-mode .agw-head { justify-content: space-between; padding-inline: 20px; }
+.agw-focus-mode .agw-main { padding: 0; gap: 0; }
+.agw-focus-mode .sss,
+.agw-focus-mode .chatcol { display: none; }
+.agw-focus-mode .agw-side { width: 100%; border: 0; border-radius: 0; }
+.agw-focus-mode .agw-side-tabs { display: none; }
+.agw-focus-mode .agw-file { max-width: 1040px; margin: 0 auto; width: 100%; }
+.agw-focus-mode .agw-focus-toggle { border-color: var(--border); }
+.agw-focus-mode .agw-head { position: relative; }
+.agw-focus-mode .agw-head::after { content: '专注写作 · Esc 退出'; position: absolute; left: 50%; transform: translateX(-50%); color: var(--text-muted); font-size: 11px; pointer-events: none; }
+
 /* 右侧面板固定宽度，绝不被内容撑爆 */
 .agw-side {
-  width: clamp(300px, 30vw, 400px);
+  width: clamp(300px, 30vw, 440px);
   flex-shrink: 0;
   min-width: 0;
 }
@@ -158,7 +178,7 @@
 }
 
 .chatcol-inner {
-  max-width: 780px;
+  max-width: 900px;
   margin: 0 auto;
   padding: 24px 20px 0;
   display: flex;
@@ -843,10 +863,10 @@
   border: none;
   border-radius: 0;
   background: transparent;
-  padding: 16px 18px;
-  font-family: ui-monospace, monospace;
-  font-size: 12.5px;
-  line-height: 1.8;
+  padding: 24px clamp(18px, 3vw, 48px);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.95;
   resize: none;
 }
 
@@ -872,6 +892,14 @@
     position: relative;
   }
 
+  .agw-mobile-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 39;
+    background: var(--overlay);
+  }
+
   .agw-side {
     position: absolute;
     right: 0;
@@ -883,9 +911,49 @@
     background: var(--bg-secondary);
   }
 
+  .agw-mobile-close { display: inline-flex; }
+  .agw-focus-mode .agw-mobile-scrim { display: none; }
+  .agw-focus-mode .agw-side { position: relative; inset: auto; width: 100%; box-shadow: none; }
+
   .sss {
     width: 56px;
   }
+}
+
+@media (max-width: 620px) {
+  .agw-head { gap: 2px; padding-inline: 5px; }
+  .agw-name { max-width: 22vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agw-badge, .agw-head-sep, .agw-head > .agw-iconbtn:nth-of-type(2), .agw-head > .agw-iconbtn:nth-of-type(3) { display: none; }
+  .agw-focus-toggle { padding: 5px 7px; }
+  .agw-focus-toggle span { display: none; }
+  .agw-main { padding: 4px; gap: 4px; }
+  .sss { width: 42px; }
+  .chatcol-inner { padding-inline: 12px; }
+  .composer { width: calc(100% - 16px); bottom: 8px; }
+  .agw-editor { padding: 18px 16px; font-size: 15px; }
+  .agw-file-actions .agw-btn { padding: 5px 7px; }
+  .agw-file-path { max-width: 32vw; }
+}
+
+.agw-save-state { align-self: center; font-size: 11px; white-space: nowrap; }
+.agw-save-state.saved { color: var(--success); }
+.agw-save-state.dirty { color: var(--warn); }
+.agw-recovery-note { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--warn) 8%, var(--bg-secondary)); }
+.agw-recovery-note > div { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; font-size: 12px; }
+.agw-recovery-note span { color: var(--text-muted); font-size: 11px; }
+.agw-recovery-note button { padding: 6px 9px; border-radius: var(--radius-sm); color: var(--accent); background: var(--accent-weak); font-size: 11px; font-weight: 600; }
+.agw-recovery-note button.quiet { color: var(--text-muted); background: transparent; }
+.agw-conflict-note { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--danger); background: color-mix(in srgb, var(--danger) 9%, var(--bg-secondary)); }
+.agw-conflict-note > div { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; font-size: 12px; }
+.agw-conflict-note span { color: var(--text-muted); font-size: 11px; }
+.agw-conflict-note button { padding: 6px 9px; border-radius: var(--radius-sm); color: var(--accent); background: var(--accent-weak); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.agw-conflict-note button.danger { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.agw-unsaved-dialog { width: min(480px, 92vw); }
+.agw-unsaved-icon { display: grid; place-items: center; width: 38px; height: 38px; margin-bottom: 14px; border-radius: var(--radius); color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.agw-unsaved-dialog .dialog-actions { gap: 8px; flex-wrap: wrap; }
+
+@media (prefers-reduced-motion: reduce) {
+  .agw-side, .chatcol-inner, .agw-editor { scroll-behavior: auto !important; transition-duration: 0s !important; }
 }
 
 /* ============ 章节 页签 ============ */

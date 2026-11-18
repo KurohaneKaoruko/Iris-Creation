@@ -1,32 +1,136 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 //! 桌面壳：内嵌 iris-creation-server（HTTP RPC + WS + webui 静态资源），
-//! 窗口直接加载 http://127.0.0.1:8765。前端与后端同源通信，
+//! 开发态由 Vite 提供前端；发行态从系统资源目录启动本机前端与 HTTP/RPC/WS，
 //! 与 iris-creation-server 独立部署形态行为完全一致。
 
-use iris_creation::commands;
+use iris_creation::{commands, desktop};
+use tauri::{Manager, Url};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+fn show_startup_error(window: &tauri::WebviewWindow, message: String) {
+  eprintln!("[iris] startup failed: {message}");
+  let _ = window.set_title("Iris-Creation · 启动失败");
+  let _ = window.show();
+  let app = window.app_handle().clone();
+  window.dialog().message(format!("{message}\n\n作品文件不会被修改。请关闭应用后重试；资源缺失时请重新安装完整安装包。"))
+    .title("Iris-Creation · 启动失败")
+    .kind(MessageDialogKind::Error)
+    .show(move |_| app.exit(1));
+}
 
 fn main() {
   tauri::Builder::default()
-    .setup(|_app| {
-      // 内嵌本地 Web 服务：托管 webui 静态资源 + RPC + WS。
-      // static_dir 相对当前工作目录解析；也可用 IRIS_CREATION_STATIC_DIR /
-      // IRIS_CREATION_DATA_DIR 环境变量覆盖。
-      tauri::async_runtime::spawn(async move {
-        let static_dir = std::env::var("IRIS_CREATION_STATIC_DIR")
+    .setup(|app| {
+      let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| std::io::Error::other("main window was not created"))?;
+      let is_dev = tauri::is_dev();
+      let static_dir = if is_dev {
+        None // Vite 托管开发 UI；内嵌服务只提供 RPC/WS。
+      } else {
+        let resources = match app.path().resource_dir() {
+          Ok(path) => path,
+          Err(error) => { show_startup_error(&window, format!("无法定位应用资源目录：{error}")); return Ok(()); }
+        };
+        let override_dir = std::env::var("IRIS_CREATION_STATIC_DIR")
           .ok()
-          .map(std::path::PathBuf::from)
-          .unwrap_or_else(|| std::path::PathBuf::from("webui/dist"));
+          .map(std::path::PathBuf::from);
+        match desktop::frontend_dir(&resources, override_dir) {
+          Ok(path) => Some(path),
+          Err(error) => { show_startup_error(&window, error); return Ok(()); }
+        }
+      };
+
+      let data_override = std::env::var("IRIS_CREATION_DATA_DIR")
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from);
+      let use_default_data = data_override.is_none();
+      let data_dir = match data_override.map(Ok).unwrap_or_else(|| app.path().app_data_dir()) {
+        Ok(path) => path,
+        Err(error) => { show_startup_error(&window, format!("无法定位用户数据目录：{error}")); return Ok(()); }
+      };
+      if let Err(error) = std::fs::create_dir_all(&data_dir) {
+        show_startup_error(&window, format!("无法创建用户数据目录 {}：{error}", data_dir.display()));
+        return Ok(());
+      }
+      iris_creation::app_data::set_storage_root_override(data_dir.clone());
+      let server_data_dir = data_dir.clone();
+      // 旧版本将配置写在 exe 同目录或旧 bundle identifier 目录；只迁移已知文件，保留原件。
+      let exe = std::env::current_exe().ok();
+      let legacy_dirs = if use_default_data { desktop::legacy_data_dirs(&data_dir, exe.as_deref().and_then(|path| path.parent())) } else { Vec::new() };
+      for legacy_dir in legacy_dirs {
+        if legacy_dir != data_dir {
+          match desktop::migrate_legacy_data(&legacy_dir, &data_dir) {
+            Ok(n) if n > 0 => eprintln!(
+              "[iris] migrated {n} legacy app-data files from {}",
+              legacy_dir.display()
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("[iris] app-data migration warning: {e}"),
+          }
+        }
+      }
+      let window_on_error = window.clone();
+      tauri::async_runtime::spawn(async move {
         let config = iris_creation::server::ServerConfig {
           host: "127.0.0.1".to_string(),
           port: 8765,
-          static_dir: Some(static_dir),
-          data_dir: std::env::var("IRIS_CREATION_DATA_DIR")
-            .ok()
-            .map(std::path::PathBuf::from),
+          static_dir,
+          data_dir: Some(data_dir),
         };
-        if let Err(e) = iris_creation::server::run(config).await {
-          eprintln!("[iris] embedded server failed: {e}");
+        let preferred = if is_dev {
+          None
+        } else {
+          desktop::preferred_server_port(&server_data_dir)
+        };
+        let mut started = None;
+        let mut last_error = String::new();
+        for port in desktop::server_port_candidates(is_dev, preferred) {
+          let mut candidate = config.clone();
+          candidate.port = port;
+          match iris_creation::server::start(candidate).await {
+            Ok(addr) => {
+              started = Some(addr);
+              break;
+            }
+            Err(e) => {
+              let retry = e.starts_with("bind ");
+              last_error = e;
+              if !retry { break; }
+            }
+          }
+        }
+        if started.is_none() && !is_dev && last_error.starts_with("bind ") {
+          let mut candidate = config;
+          candidate.port = 0;
+          match iris_creation::server::start(candidate).await {
+            Ok(addr) => started = Some(addr),
+            Err(error) => last_error = error,
+          }
+        }
+        match started {
+          Some(addr) => {
+            if !is_dev {
+              if let Err(e) = desktop::remember_server_port(&server_data_dir, addr.port()) {
+                eprintln!("[iris] cannot remember local server port: {e}");
+              }
+              if let Ok(url) = Url::parse(&format!("http://{addr}/")) {
+                if let Err(e) = window.navigate(url) {
+                  show_startup_error(&window, format!("无法加载写作界面：{e}"));
+                  return;
+                }
+              }
+            }
+            if let Err(e) = window.show() {
+              eprintln!("[iris] failed to show main window: {e}");
+            }
+          }
+          None => {
+            show_startup_error(&window_on_error, format!("本地写作服务启动失败：{last_error}"));
+          }
         }
       });
       Ok(())
@@ -63,6 +167,7 @@ fn main() {
       commands::read_text,
       commands::export_work,
       commands::write_text,
+      commands::write_text_if_current,
       commands::create_file,
       commands::create_dir,
       commands::delete_entry,

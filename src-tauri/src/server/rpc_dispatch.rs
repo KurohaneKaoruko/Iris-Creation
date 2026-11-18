@@ -165,6 +165,12 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
       let content = arg_str(&args, &["content"])?;
       crate::services::fs::write_text(state, &path, &content).map(|_| json!(null))
     }
+    "write_text_if_current" => {
+      let path = arg_str(&args, &["relative_path", "relativePath", "path"])?;
+      let content = arg_str(&args, &["content"])?;
+      let expected = arg_str(&args, &["expected_current", "expectedCurrent"])?;
+      crate::services::fs::write_text_with_baseline(state, &path, &content, Some(&expected)).map(|_| json!(null))
+    }
     "create_file" => {
       let path = arg_str(&args, &["relative_path", "relativePath", "path"])?;
       crate::services::fs::create_file(state, &path).map(|_| json!(null))
@@ -521,5 +527,25 @@ mod tests {
     let ctx = test_context();
     let err = dispatch(&ctx, "read_text", json!({})).await.unwrap_err();
     assert!(err.contains("missing argument"));
+  }
+
+  #[tokio::test]
+  async fn guarded_editor_write_rejects_stale_baseline() {
+    let ctx = test_context();
+    let root = std::env::temp_dir().join(format!("iris-rpc-write-guard-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("stories")).unwrap();
+    let path = root.join("stories/chapter-0001.md");
+    std::fs::write(&path, "external edit").unwrap();
+    *ctx.app_state.workspace_root.lock().unwrap() = Some(root.clone());
+    let stale = dispatch(&ctx, "write_text_if_current", json!({
+      "relativePath":"stories/chapter-0001.md", "content":"stale editor write", "expectedCurrent":"old content"
+    })).await.unwrap_err();
+    assert!(stale.contains("changed on disk"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit");
+    dispatch(&ctx, "write_text_if_current", json!({
+      "relativePath":"stories/chapter-0001.md", "content":"saved editor write", "expectedCurrent":"external edit"
+    })).await.unwrap();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "saved editor write");
+    let _ = std::fs::remove_dir_all(root);
   }
 }

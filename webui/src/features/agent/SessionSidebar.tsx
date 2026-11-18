@@ -9,13 +9,14 @@ type SessionSidebarProps = {
   onNewSession: () => void
   onLoadSession: (id: string) => void
   onDeleteSession: (id: string) => void
+  onCloseWork: () => void
   collapsed: boolean
   onToggle: () => void
 }
 
 /** 左侧会话栏（ChatGPT 式）：新建会话 / 历史会话 / 工程信息 / 折叠 */
-export function SessionSidebar({ activeSessionId, onNewSession, onLoadSession, onDeleteSession, collapsed, onToggle }: SessionSidebarProps) {
-  const { workRoot, workName, closeWork } = useProject()
+export function SessionSidebar({ activeSessionId, onNewSession, onLoadSession, onDeleteSession, onCloseWork, collapsed, onToggle }: SessionSidebarProps) {
+  const { workRoot, workName } = useProject()
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([])
   const [loading, setLoading] = useState(false)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
@@ -102,7 +103,7 @@ export function SessionSidebar({ activeSessionId, onNewSession, onLoadSession, o
       </div>
 
       <div className="sss-foot">
-        <button className="sss-foot-btn" onClick={closeWork} title="关闭工程，返回启动页">
+        <button className="sss-foot-btn" onClick={onCloseWork} title="关闭工程，返回启动页">
           <Icon name="log-out" size={14} />
           关闭工程
         </button>

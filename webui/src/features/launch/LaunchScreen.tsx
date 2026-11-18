@@ -10,12 +10,13 @@ import './LaunchScreen.css'
  * 启动页：继续上次工程 / 打开目录（服务端目录浏览器点选）/ 最近工程 / 新建标准工程。
  */
 export function LaunchScreen() {
-  const { state, openDir, refresh } = useProject()
+  const { state, openDir, refresh, setError } = useProject()
   const { theme, toggleTheme } = useTheme()
   const [pickerOpen, setPickerOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [busy, setBusy] = useState(false)
+  const [query, setQuery] = useState('')
 
   const recent = [
     ...(state?.external_projects ?? []),
@@ -25,6 +26,9 @@ export function LaunchScreen() {
   const lastPath = state?.last_workspace ?? null
   const lastItem = lastPath ? recent.find((p) => p.path === lastPath) : undefined
   const lastName = lastPath?.split(/[/\\]/).filter(Boolean).pop() ?? ''
+  const filteredRecent = recent
+    .filter((p, i, arr) => arr.findIndex((x) => x.path === p.path) === i)
+    .filter((p) => !query.trim() || `${p.name} ${p.path}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
 
   // 「继续上次工程」卡片就绪动画
   const [lastReady, setLastReady] = useState(false)
@@ -42,12 +46,12 @@ export function LaunchScreen() {
       setCreating(false)
       setNewName('')
       await openDir(p.path)
-    } catch {
-      /* openDir 已 toast */
+    } catch (error) {
+      setError(`新建作品失败：${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setBusy(false)
     }
-  }, [busy, newName, openDir])
+  }, [busy, newName, openDir, setError])
 
   return (
     <div className="launch">
@@ -65,7 +69,7 @@ export function LaunchScreen() {
             className={`launch-resume glass-panel ${lastReady ? 'in' : ''}`}
             onClick={() => void openDir(lastPath)}
           >
-            <span className="launch-resume-label">继续上次</span>
+            <span className="launch-resume-label"><Icon name="clock" size={13} />继续上次</span>
             <span className="launch-resume-name">{lastName}</span>
             <span className="launch-resume-meta">
               {lastItem ? `${lastItem.chapters_count} 章 · ${lastItem.total_words.toLocaleString()} 字 · ` : ''}
@@ -106,11 +110,13 @@ export function LaunchScreen() {
 
         {recent.length > 0 ? (
           <section className="launch-recent">
-            <h3>最近打开</h3>
+            <div className="launch-recent-head">
+              <div><h3>最近打开</h3><span>{filteredRecent.length} 个作品</span></div>
+              <label className="launch-recent-search"><Icon name="search" size={14} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索作品或路径" aria-label="搜索最近作品" /></label>
+            </div>
             <div className="launch-recent-list">
-              {recent
-                .filter((p, i, arr) => arr.findIndex((x) => x.path === p.path) === i)
-                .slice(0, 8)
+              {filteredRecent
+                .slice(0, query.trim() ? 500 : 8)
                 .map((p) => (
                   <div key={p.path} className="launch-recent-item glass-panel">
                     <button className="lr-open" onClick={() => void openDir(p.path)}>
@@ -130,6 +136,8 @@ export function LaunchScreen() {
                   </div>
                 ))}
             </div>
+            {filteredRecent.length === 0 ? <div className="launch-recent-empty">没有匹配的作品。试试作品名或完整路径。</div> : null}
+            {!query.trim() && filteredRecent.length > 8 ? <p className="launch-recent-more">显示最近 8 个作品 · 搜索可查看其他 {filteredRecent.length - 8} 个</p> : null}
           </section>
         ) : null}
       </main>

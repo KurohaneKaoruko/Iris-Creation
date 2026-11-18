@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FsEntry } from '../../api/backend'
-import { createDir, createFile, listWorkspaceTree, readText, renameEntry, deleteEntry as del, writeText, getSkills, getChatSession, saveChatSession, deleteChatSession, getAppSettings, getApiKeyStatus, exportWork, type Skill, type ChatMessagePayload } from '../../api/backend'
+import { createDir, createFile, listWorkspaceTree, readText, renameEntry, deleteEntry as del, writeText, writeTextIfCurrent, getSkills, getChatSession, saveChatSession, deleteChatSession, getAppSettings, getApiKeyStatus, exportWork, type Skill, type ChatMessagePayload } from '../../api/backend'
 import { listChapters, createChapterFile, loadWritingHistory, recordTodayWords } from '../../api/novel'
 
 /** Blob 触发浏览器下载 */
@@ -33,6 +33,7 @@ import { ChaptersPanel } from './ChaptersPanel'
 import { LorePanel } from './LorePanel'
 import { DiffView } from './DiffView'
 import { findHits, nextHit, type FindHit } from '../../api/editorFind'
+import { editorDraftKey, parseEditorDraft, shouldOfferDraftRecovery, type EditorDraft } from '../../api/editorDraft'
 import './AgentWorkspace.css'
 
 /**
@@ -46,14 +47,18 @@ export function AgentWorkspace() {
   const [tree, setTree] = useState<FsEntry | null>(null)
   const [fileContent, setFileContent] = useState('')
   const [fileLoading, setFileLoading] = useState(false)
+  const [fileLoadError, setFileLoadError] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editDraft, setEditDraft] = useState('')
   const [externalChange, setExternalChange] = useState<{ path: string; at: number } | null>(null)
+  const [diskConflict, setDiskConflict] = useState<{ path: string; content: string } | null>(null)
   const [previewMode, setPreviewMode] = useState<'content' | 'history'>('content')
   const [skills, setSkills] = useState<Skill[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [focusMode, setFocusMode] = useState(false)
   // 右侧文件面板默认常驻（对标主流 Agent 三栏）；极窄屏（<900px）才退化为覆盖抽屉
-  const [panelOpen, setPanelOpen] = useState(true)
+  const [panelOpen, setPanelOpen] = useState(() => typeof window === 'undefined' || window.innerWidth > 900)
   const [panelTab, setPanelTab] = useState<'tree' | 'chapters' | 'lore' | 'file'>('tree')
   const [dialog, setDialog] = useState<
     | { kind: 'new-file' }
@@ -66,7 +71,7 @@ export function AgentWorkspace() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
-  const [toolsTab, setToolsTab] = useState<'planner' | 'stats' | 'consistency' | 'lint' | 'import' | 'search'>('planner')
+  const [toolsTab, setToolsTab] = useState<'planner' | 'stats' | 'consistency' | 'lint' | 'import' | 'search' | 'export' | 'backup'>('planner')
   const [studioOpen, setStudioOpen] = useState(false)
   const [studioToolId, setStudioToolId] = useState<string | null>(null)
   /** 编辑器选中文本（选中时显示浮动工坊按钮） */
@@ -74,6 +79,8 @@ export function AgentWorkspace() {
   const [selRange, setSelRange] = useState<{ start: number; end: number } | null>(null)
   /** 编辑器内查找条（Ctrl+F 唤起） */
   const [findOpen, setFindOpen] = useState(false)
+  const [pendingGuard, setPendingGuard] = useState<{ description: string; action: () => void } | null>(null)
+  const [recoveryDraft, setRecoveryDraft] = useState<EditorDraft | null>(null)
   const editorRef = useRef<HTMLTextAreaElement>(null)
   const findInputRef = useRef<HTMLInputElement>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -82,6 +89,46 @@ export function AgentWorkspace() {
   const sessionIdRef = useRef<string | null>(null)
   /** 检索面板「点击直达」挂起的跳行请求：文件加载完成后由预览区消费 */
   const pendingLineRef = useRef<{ path: string; line: number } | null>(null)
+  const draftBaselineRef = useRef('')
+  const editingRef = useRef(editing)
+  const fileContentRef = useRef(fileContent)
+  const saveInFlight = useRef(false)
+  editingRef.current = editing
+  fileContentRef.current = fileContent
+  const hasUnsavedChanges = editing && editDraft !== fileContent
+
+  const guardUnsavedAction = useCallback((description: string, action: () => void) => {
+    if (saveInFlight.current) return
+    if (editing && editDraft !== fileContent) {
+      setPendingGuard({ description, action })
+      return
+    }
+    action()
+  }, [editing, editDraft, fileContent])
+
+  const navigateToPath = useCallback((path: string | null, line?: number) => {
+    guardUnsavedAction('切换文件', () => {
+      if (path && line != null) pendingLineRef.current = { path, line }
+      setActivePath(path)
+      if (path) {
+        setPanelOpen(true)
+        setPanelTab('file')
+      }
+    })
+  }, [guardUnsavedAction, setActivePath])
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (activePath) {
+        try { localStorage.setItem(editorDraftKey(workRoot ?? '', activePath), JSON.stringify({ baseContent: draftBaselineRef.current, draft: editDraft, savedAt: Date.now() })) } catch { /* storage unavailable */ }
+      }
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warnBeforeUnload)
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload)
+  }, [hasUnsavedChanges, activePath, workRoot, editDraft])
 
   const refreshTree = useCallback(async () => {
     if (!workRoot) return
@@ -119,6 +166,7 @@ export function AgentWorkspace() {
 
   useEffect(() => {
     let timer = 0
+    let alive = true
     const un = subscribeEvent('fs_changed', (raw) => {
       const p = (raw ?? {}) as { path?: string }
       window.clearTimeout(timer)
@@ -127,7 +175,14 @@ export function AgentWorkspace() {
         if (p.path && activePath && p.path === activePath) {
           const changedPath = p.path
           void readText(activePath).then((c) => {
-            setFileContent(c)
+            if (!alive) return
+            if (editingRef.current) {
+              if (c !== fileContentRef.current) setDiskConflict({ path: changedPath, content: c })
+            } else {
+              setFileContent(c)
+              setEditDraft(c)
+              draftBaselineRef.current = c
+            }
             // 非编辑态下文件被外部（Agent）修改时，给一条可关闭的提示
             setExternalChange((prev) => (prev?.path === changedPath ? prev : { path: changedPath, at: Date.now() }))
           }).catch(() => {})
@@ -135,6 +190,7 @@ export function AgentWorkspace() {
       }, 600)
     })
     return () => {
+      alive = false
       window.clearTimeout(timer)
       un()
     }
@@ -144,6 +200,15 @@ export function AgentWorkspace() {
     setEditing(false)
     setPreviewMode('content')
     setFindOpen(false)
+    setDiskConflict(null)
+    setExternalChange(null)
+    setRecoveryDraft(null)
+    setPendingGuard(null)
+    setFileLoadError(false)
+    setSelection('')
+    setSelRange(null)
+    setFileContent('')
+    setEditDraft('')
     if (!activePath) {
       setFileContent('')
       return
@@ -154,7 +219,17 @@ export function AgentWorkspace() {
       .then((c) => {
         if (!alive) return
         setFileContent(c)
+        setEditDraft(c)
+        draftBaselineRef.current = c
         setFileLoading(false)
+        const key = editorDraftKey(workRoot ?? '', activePath)
+        let savedDraft: EditorDraft | null = null
+        try { savedDraft = parseEditorDraft(localStorage.getItem(key)) } catch { /* storage disabled */ }
+        if (shouldOfferDraftRecovery(savedDraft, c)) setRecoveryDraft(savedDraft)
+        else {
+          setRecoveryDraft(null)
+          if (savedDraft) { try { localStorage.removeItem(key) } catch { /* storage disabled */ } }
+        }
         // 检索面板「点击直达」：文件就绪后滚动到目标行并短暂高亮
         const pending = pendingLineRef.current
         if (pending && pending.path === activePath) {
@@ -178,13 +253,29 @@ export function AgentWorkspace() {
       })
       .catch((e) => {
         if (!alive) return
+        setFileLoadError(true)
         setError(`读取失败：${e instanceof Error ? e.message : String(e)}`)
         setFileLoading(false)
       })
     return () => {
       alive = false
     }
-  }, [activePath, setError])
+  }, [activePath, workRoot, setError])
+
+  useEffect(() => {
+    if (!editing || !activePath) return
+    const key = editorDraftKey(workRoot ?? '', activePath)
+    if (editDraft === draftBaselineRef.current) {
+      try { localStorage.removeItem(key) } catch { /* storage unavailable */ }
+      return
+    }
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem(key, JSON.stringify({ baseContent: draftBaselineRef.current, draft: editDraft, savedAt: Date.now() }))
+      } catch { /* local storage full/private mode: in-memory editing remains available */ }
+    }, 700)
+    return () => window.clearTimeout(timer)
+  }, [editing, editDraft, activePath, workRoot])
 
   // Agent 提到文件 / 写文件 → 面板亮起
   useEffect(() => {
@@ -260,6 +351,10 @@ export function AgentWorkspace() {
   // Ctrl+K / Cmd+K 打开命令面板
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && focusMode) {
+        setFocusMode(false)
+        return
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setPaletteOpen((v) => !v)
@@ -267,10 +362,10 @@ export function AgentWorkspace() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [focusMode])
 
   const paletteCommands = useMemo<Command[]>(() => [
-    { id: 'new-session', icon: 'plus', label: '新建会话', hint: 'Ctrl+K 后回车', run: newSession },
+    { id: 'new-session', icon: 'plus', label: '新建会话', hint: 'Ctrl+K 后回车', run: () => guardUnsavedAction('新建会话', newSession) },
     { id: 'new-chapter', icon: 'file-plus', label: '新建章节', keywords: 'chapter 写作', run: () => setDialog({ kind: 'new-chapter' }) },
     { id: 'new-file', icon: 'file-plus', label: '新建 Markdown 文件', keywords: 'file create', run: () => setDialog({ kind: 'new-file' }) },
     { id: 'new-dir', icon: 'folder-plus', label: '新建目录', keywords: 'folder mkdir', run: () => setDialog({ kind: 'new-dir' }) },
@@ -281,6 +376,8 @@ export function AgentWorkspace() {
     { id: 'tools-search', icon: 'search', label: '全文检索', keywords: '工具 search 检索 搜索 全文 查找 find', run: () => { setToolsTab('search'); setToolsOpen(true) } },
     { id: 'tools-planner', icon: 'list-checks', label: 'AI 任务队列', keywords: '工具 任务 拆解 队列 planner 章节 连续生成', run: () => { setToolsTab('planner'); setToolsOpen(true) } },
     { id: 'tools-stats', icon: 'chart', label: '作品统计', keywords: '工具 stats 统计', run: () => { setToolsTab('stats'); setToolsOpen(true) } },
+    { id: 'tools-export', icon: 'download', label: '导出中心', keywords: 'export 导出 txt markdown dossier', run: () => { setToolsTab('export'); setToolsOpen(true) } },
+    { id: 'tools-backup', icon: 'package', label: '备份报告', keywords: 'backup 备份 sha256', run: () => { setToolsTab('backup'); setToolsOpen(true) } },
     { id: 'tools-consistency', icon: 'list-checks', label: '一致性检查', keywords: '工具 检查 consistency 人物 伏笔 情节线', run: () => { setToolsTab('consistency'); setToolsOpen(true) } },
     { id: 'tools-lint', icon: 'scale', label: '正文铁律体检', keywords: '工具 lint 体检 套路', run: () => { setToolsTab('lint'); setToolsOpen(true) } },
     { id: 'tools-import', icon: 'file-input', label: '导入切章', keywords: '工具 导入 import txt 切章', run: () => { setToolsTab('import'); setToolsOpen(true) } },
@@ -306,8 +403,12 @@ export function AgentWorkspace() {
         void exportWork('txt').then(({ filename, content }) => downloadText(filename, content))
       },
     },
-    { id: 'close-work', icon: 'log-out', label: '关闭工程（返回启动页）', keywords: 'close launch', run: closeWork },
-  ], [newSession, panelOpen, sidebarCollapsed, theme, toggleTheme, closeWork, setToolsTab])
+    { id: 'focus-writing', icon: 'focus', label: focusMode ? '退出沉浸写作' : '沉浸写作', keywords: 'focus writing editor 沉浸', run: () => {
+      if (!activePath) { setPanelOpen(true); setPanelTab('chapters'); return }
+      setFocusMode((v) => !v); setPanelOpen(true); setPanelTab('file')
+    } },
+    { id: 'close-work', icon: 'log-out', label: '关闭工程（返回启动页）', keywords: 'close launch', run: () => guardUnsavedAction('关闭作品', closeWork) },
+  ], [newSession, panelOpen, sidebarCollapsed, focusMode, theme, toggleTheme, closeWork, setToolsTab, guardUnsavedAction, activePath])
 
   const mdFiles = useMemo(() => {
     const out: FsEntry[] = []
@@ -322,31 +423,31 @@ export function AgentWorkspace() {
   const jumpToFile = useCallback(
     (p: string, line?: number) => {
       const hit = mdFiles.find((f) => f.path === p || f.path.endsWith(`/${p}`) || f.name === p)
-      if (hit) {
-        setActivePath(hit.path)
-        setPanelOpen(true)
-        setPanelTab('file')
-        if (line != null) pendingLineRef.current = { path: hit.path, line }
-      }
+      if (hit) navigateToPath(hit.path, line)
     },
-    [mdFiles, setActivePath],
+    [mdFiles, navigateToPath],
   )
 
   const runDialog = useCallback(
-    async (action: typeof dialog, value: string) => {
+    async (action: typeof dialog, value: string, bypassGuard = false) => {
       if (!action) return
+      if (!bypassGuard && (action.kind === 'delete' || action.kind === 'rename') && activePath === action.path && hasUnsavedChanges) {
+        setPendingGuard({
+          description: action.kind === 'delete' ? '删除当前文件' : '重命名当前文件',
+          action: () => { void runDialog(action, value, true) },
+        })
+        return
+      }
       try {
         if (action.kind === 'new-file') {
           await createFile(value)
           await refreshTree()
-          setActivePath(value)
-          setPanelTab('file')
+          navigateToPath(value)
         } else if (action.kind === 'new-chapter') {
           const existing = await listChapters()
           const p = await createChapterFile(value.trim() || `第${existing.length + 1}章`)
           await refreshTree()
-          setActivePath(p)
-          setPanelTab('file')
+          navigateToPath(p)
         } else if (action.kind === 'new-dir') {
           await createDir(value)
           await refreshTree()
@@ -354,7 +455,10 @@ export function AgentWorkspace() {
           const idx = action.path.lastIndexOf('/')
           const to = idx >= 0 ? `${action.path.slice(0, idx)}/${value}` : value
           await renameEntry(action.path, to)
-          if (activePath === action.path) setActivePath(to)
+          if (activePath === action.path) {
+            setActivePath(to)
+            setPanelTab('file')
+          }
           await refreshTree()
         } else if (action.kind === 'delete') {
           await del(action.path)
@@ -367,7 +471,7 @@ export function AgentWorkspace() {
         setDialog(null)
       }
     },
-    [activePath, refreshTree, setActivePath, setError],
+    [activePath, hasUnsavedChanges, navigateToPath, refreshTree, setActivePath, setError],
   )
 
   /** 编辑器选区捕获：供浮动工坊按钮取用 */
@@ -387,34 +491,67 @@ export function AgentWorkspace() {
     setSelRange(null)
   }, [selRange, selection])
 
-  const saveEdit = useCallback(async () => {
-    if (!activePath) return
+  const saveEdit = useCallback(async (force = false): Promise<boolean> => {
+    if (!activePath || fileLoading || fileLoadError || saveInFlight.current) return false
+    saveInFlight.current = true
+    setSaving(true)
     try {
-      await writeText(activePath, editDraft)
+      if (!force) {
+        const diskContent = await readText(activePath)
+        if (diskContent !== fileContent) {
+          setDiskConflict({ path: activePath, content: diskContent })
+          return false
+        }
+      }
+      if (force) await writeText(activePath, editDraft)
+      else await writeTextIfCurrent(activePath, editDraft, fileContent)
       // 写作统计闭环：章节文件保存时按日累计净增字数（非章节文档不计入）
       if (/^stories\/.*\.(md|txt)$/i.test(activePath)) {
         const delta = editDraft.replace(/\s/g, '').length - fileContent.replace(/\s/g, '').length
         if (delta > 0) {
-          const { dailyGoal: goal } = await loadWritingHistory()
-          await recordTodayWords(delta, goal).catch(() => {})
+          await loadWritingHistory().then(({ dailyGoal: goal }) => recordTodayWords(delta, goal)).catch(() => {})
         }
       }
       setFileContent(editDraft)
+      setDiskConflict(null)
+      setExternalChange(null)
+      draftBaselineRef.current = editDraft
+      try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch { /* storage disabled */ }
       setEditing(false)
       void refreshTree()
+      return true
     } catch (e) {
-      setError(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+      const message = e instanceof Error ? e.message : String(e)
+      if (!force && /changed on disk/i.test(message)) {
+        try {
+          setDiskConflict({ path: activePath, content: await readText(activePath) })
+        } catch {
+          setError('磁盘版本无法读取，请先复制当前草稿再继续。')
+        }
+        return false
+      }
+      setError(`保存失败：${message}`)
+      return false
+    } finally {
+      saveInFlight.current = false
+      setSaving(false)
     }
-  }, [activePath, editDraft, fileContent, refreshTree, setError])
+  }, [activePath, editDraft, fileContent, fileLoading, fileLoadError, refreshTree, setError, workRoot])
 
   return (
-    <div className="agw">
+    <div className={`agw ${focusMode ? 'agw-focus-mode' : ''}`}>
       <header className="agw-head">
         <span className="agw-name">{workName}</span>
         <span className="agw-badge">Agent</span>
         <span className="agw-spacer" />
         <button className="agw-iconbtn" onClick={() => setPaletteOpen(true)} title="命令面板（Ctrl+K）">
           <Icon name="command" size={17} />
+        </button>
+        <button className={`agw-btn agw-focus-toggle ${focusMode ? 'active' : ''}`} onClick={() => {
+          if (!activePath && !focusMode) { setPanelOpen(true); setPanelTab('chapters'); return }
+          setFocusMode((v) => !v); setPanelOpen(true); setPanelTab('file')
+        }} title={activePath ? '隐藏会话与工具栏，专注写作' : '先在章节或文件面板中打开一篇正文'}>
+          <Icon name="focus" size={15} /><span>{focusMode ? '退出专注' : '专注写作'}</span>
         </button>
         <button className="agw-iconbtn" onClick={() => { setStudioToolId(null); setStudioOpen(true) }} title="创作工坊：头脑风暴 / 场景 / 对话 / 润色等 AI 快捷创作">
           <Icon name="sparkles" size={16} />
@@ -439,15 +576,17 @@ export function AgentWorkspace() {
       <div className="agw-main">
         <SessionSidebar
           activeSessionId={activeSessionId}
-          onNewSession={newSession}
-          onLoadSession={loadSession}
+          onNewSession={() => guardUnsavedAction('新建会话', newSession)}
+          onLoadSession={(id) => guardUnsavedAction('切换会话', () => { void loadSession(id) })}
           onDeleteSession={(id) => void deleteSession(id)}
+          onCloseWork={() => guardUnsavedAction('关闭作品', closeWork)}
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed((v) => !v)}
         />
 
         <ChatColumn chat={chat} skills={skills} workName={workName} onJumpFile={jumpToFile} onOpenSettings={() => setSettingsOpen(true)} />
 
+        {panelOpen ? <button className="agw-mobile-scrim" aria-label="关闭文件面板" onClick={() => setPanelOpen(false)} /> : null}
         {panelOpen ? (
           <aside className="agw-side glass-panel">
             <div className="agw-side-tabs">
@@ -458,6 +597,7 @@ export function AgentWorkspace() {
               <span className="agw-side-spacer" />
               <button className="agw-iconbtn sm" title="新建文件" onClick={() => setDialog({ kind: 'new-file' })}><Icon name="file-plus" size={15} /></button>
               <button className="agw-iconbtn sm" title="新建目录" onClick={() => setDialog({ kind: 'new-dir' })}><Icon name="folder-plus" size={15} /></button>
+              <button className="agw-iconbtn sm agw-mobile-close" title="关闭面板" onClick={() => setPanelOpen(false)}><Icon name="x" size={15} /></button>
             </div>
 
             {panelTab === 'tree' ? (
@@ -467,11 +607,10 @@ export function AgentWorkspace() {
                     entry={tree}
                     activePath={activePath}
                     onOpen={(p) => {
-                      setActivePath(p)
-                      setPanelTab('file')
+                      navigateToPath(p)
                     }}
-                    onRename={(p) => setDialog({ kind: 'rename', path: p, name: p.split('/').pop() ?? p })}
-                    onDelete={(p) => setDialog({ kind: 'delete', path: p })}
+                    onRename={(p) => guardUnsavedAction('重命名文件', () => setDialog({ kind: 'rename', path: p, name: p.split('/').pop() ?? p }))}
+                    onDelete={(p) => guardUnsavedAction('删除文件', () => setDialog({ kind: 'delete', path: p }))}
                   />
                 ) : (
                   <div className="agw-empty">加载中…</div>
@@ -481,16 +620,14 @@ export function AgentWorkspace() {
               <LorePanel
                 activePath={activePath}
                 onOpen={(p) => {
-                  setActivePath(p)
-                  setPanelTab('file')
+                  navigateToPath(p)
                 }}
               />
             ) : panelTab === 'chapters' ? (
               <ChaptersPanel
                 activePath={activePath}
                 onOpen={(p) => {
-                  setActivePath(p)
-                  setPanelTab('file')
+                  navigateToPath(p)
                 }}
                 onNewChapter={() => setDialog({ kind: 'new-chapter' })}
                 onImport={() => {
@@ -507,26 +644,48 @@ export function AgentWorkspace() {
                       <span className="agw-file-actions">
                         {editing ? (
                           <>
-                            <button className="agw-btn primary" onClick={() => void saveEdit()}>保存</button>
-                            <button className="agw-btn" onClick={() => setEditing(false)}>取消</button>
+                            <span className={`agw-save-state ${hasUnsavedChanges ? 'dirty' : 'saved'}`}>{hasUnsavedChanges ? '未保存' : '已保存'}</span>
+                            <button className="agw-btn primary" disabled={saving} onClick={() => void saveEdit()}>{saving ? '保存中…' : '保存'}</button>
+                            <button className="agw-btn" disabled={saving} onClick={() => guardUnsavedAction('放弃未保存修改', () => { try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch {} setEditDraft(fileContent); setEditing(false) })}>取消</button>
                           </>
                         ) : (
                           <>
-                            <button className="agw-btn" onClick={() => { setEditDraft(fileContent); setEditing(true) }}>编辑</button>
+                            <button className="agw-btn" disabled={fileLoading || fileLoadError} onClick={() => { draftBaselineRef.current = fileContent; setEditDraft(fileContent); setPreviewMode('content'); setEditing(true) }}>编辑</button>
                             <button className="agw-btn" onClick={() => window.dispatchEvent(new CustomEvent('agent-attach-file', { detail: activePath }))} title="作为 Agent 上下文">给 Agent</button>
                             <button className="agw-btn" onClick={() => setPreviewMode('history')} title="变更历史与版本恢复">历史</button>
                           </>
                         )}
                       </span>
                     </div>
-                    {externalChange && externalChange.path === activePath && !editing ? (
+                    {diskConflict && diskConflict.path === activePath && editing ? (
+                      <div className="agw-conflict-note" role="alert">
+                        <div><strong>磁盘内容已被其他操作修改</strong><span>为避免静默覆盖，请选择载入新内容或明确覆盖。</span></div>
+                        <button disabled={saving} onClick={() => {
+                          setFileContent(diskConflict.content)
+                          setEditDraft(diskConflict.content)
+                          draftBaselineRef.current = diskConflict.content
+                          setDiskConflict(null)
+                          setEditing(false)
+                          try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch { /* storage disabled */ }
+                        }}>载入磁盘版本</button>
+                        <button className="danger" disabled={saving} onClick={() => void saveEdit(true)}>仍覆盖</button>
+                      </div>
+                    ) : null}
+                    {externalChange && externalChange.path === activePath && !editing && !diskConflict ? (
                       <div className="agw-external-note">
                         <span><Icon name="refresh" size={13} /> 此文件刚被更新（可能来自 Agent 写入）</span>
                         <button onClick={() => setExternalChange(null)}>知道了</button>
                       </div>
                     ) : null}
+                    {recoveryDraft && !editing ? (
+                      <div className="agw-recovery-note" role="status">
+                        <div><strong>找到未保存的本地草稿</strong><span>{recoveryDraft.baseContent === fileContent ? '原文件未变化' : '磁盘文件已变化，请确认后恢复'}</span></div>
+                        <button onClick={() => { draftBaselineRef.current = fileContent; setEditDraft(recoveryDraft.draft); setEditing(true); setRecoveryDraft(null) }}>恢复草稿</button>
+                        <button className="quiet" onClick={() => { try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch {} setRecoveryDraft(null) }}>丢弃</button>
+                      </div>
+                    ) : null}
                     <div className="agw-file-body">
-                      {previewMode === 'history' && activePath ? (
+                      {fileLoadError ? <div className="agw-empty" role="alert">读取文件失败，请重新打开文件；未保存的草稿仍保留在本地。</div> : previewMode === 'history' && activePath ? (
                         <DiffView
                           path={activePath}
                           currentContent={fileContent}
@@ -544,6 +703,8 @@ export function AgentWorkspace() {
                             <textarea
                               ref={editorRef}
                               className="agw-editor"
+                              aria-label="正文编辑器"
+                              disabled={saving}
                               value={editDraft}
                               onChange={(e) => setEditDraft(e.target.value)}
                               onKeyDown={(e) => {
@@ -653,6 +814,35 @@ export function AgentWorkspace() {
       ) : null}
       {dialog?.kind === 'delete' ? (
         <ConfirmDialog title="删除确认" message={`确认删除 ${dialog.path}？`} danger onConfirm={() => void runDialog(dialog, '')} onCancel={() => setDialog(null)} />
+      ) : null}
+
+      {pendingGuard ? (
+        <div className="modal-overlay" onClick={() => { if (!saving) setPendingGuard(null) }}>
+          <div className="dialog-box glass-panel agw-unsaved-dialog" role="alertdialog" aria-modal="true" aria-labelledby="agw-unsaved-title" onClick={(e) => e.stopPropagation()}>
+            <div className="agw-unsaved-icon"><Icon name="save" size={18} /></div>
+            <h3 className="dialog-title" id="agw-unsaved-title">还有修改没有保存</h3>
+            <p className="dialog-message">先保存当前内容，再{pendingGuard.description}？</p>
+            <div className="dialog-actions">
+              <button className="dialog-btn" disabled={saving} autoFocus onClick={() => setPendingGuard(null)}>继续编辑</button>
+              <button className="dialog-btn danger" disabled={saving} onClick={() => {
+                const action = pendingGuard.action
+                setPendingGuard(null)
+                if (activePath) { try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch {} }
+                setEditing(false)
+                setEditDraft(fileContent)
+                action()
+              }}>放弃修改</button>
+              <button className="dialog-btn primary" disabled={saving} onClick={() => {
+                const action = pendingGuard.action
+                void saveEdit(!!diskConflict && diskConflict.path === activePath).then((ok) => {
+                  if (!ok) return
+                  setPendingGuard(null)
+                  action()
+                })
+              }}>{diskConflict && diskConflict.path === activePath ? '覆盖并继续' : '保存并继续'}</button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {settingsOpen ? <SettingsDialog onClose={() => setSettingsOpen(false)} /> : null}

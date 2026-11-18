@@ -1,6 +1,7 @@
 //! Iris-Creation 共享库：桌面（Tauri）与本地服务端（iris-creation-server）共用。
 
 pub mod commands;
+pub mod desktop;
 pub mod services;
 pub mod event_sink;
 pub mod ai_types;

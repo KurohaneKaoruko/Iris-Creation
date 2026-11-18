@@ -46,6 +46,7 @@
 ## 核心能力
 
 - 多标签 Markdown 写作编辑
+- 草稿崩溃恢复、外部修改冲突保护、变更历史与版本恢复
 - 自动保存与预览
 - 新建章节 / 设定 / 大纲文件
 - AI 续写、改写、润色、规划与一致性检查
@@ -58,7 +59,7 @@
 
 ### 环境要求（Windows）
 
-- Node.js 18+
+- Node.js 22.12+（CI 与当前 Vitest 5 均要求 Node 22+）
 - Rust stable（含 `cargo`）
 - Visual Studio Build Tools（Desktop development with C++ / MSVC）
 - WebView2 Runtime
@@ -71,6 +72,7 @@ git clone --recurse-submodules <repo-url>
 git submodule update --init --recursive
 
 pnpm install --frozen-lockfile
+pnpm --dir webui install --frozen-lockfile
 pnpm run tauri:dev
 ```
 
@@ -78,8 +80,11 @@ pnpm run tauri:dev
 
 ```powershell
 pnpm install --frozen-lockfile
+pnpm --dir webui install --frozen-lockfile
 pnpm run tauri:build
 ```
+
+安装包会携带 Web 前端资源，桌面壳从应用资源目录启动本地服务；启动不依赖终端当前目录。第一次启动会把旧版本的设置、会话和书架状态补迁移到系统用户数据目录，保留旧文件且不覆盖已有配置（不会移动或删除作品文件）。桌面端绑定本地服务后显示窗口，界面再完成健康检查；服务或资源启动失败时显示原生错误对话框，连接异常时提供重试与诊断提示。
 
 ## 常用命令
 
@@ -88,7 +93,7 @@ pnpm run tauri:build
 - `pnpm run build`：构建前端
 - `pnpm run tauri:build`：构建桌面应用
 - `pnpm run test`：运行 Vitest
-- `pnpm run lint`：运行 ESLint
+- `pnpm run lint`：TypeScript 类型检查
 
 ## AI 工作流摘要
 
@@ -116,13 +121,15 @@ Memory 索引位于：
 
 ## 主要存储位置
 
-- App settings: `<install-dir>/config/settings.json`
-- Writing assistants: `<install-dir>/data/agents.json`
-- Chat history: `<install-dir>/data/chat_history.json`
-- Bookshelf state: `<install-dir>/state/last_workspace.json`, `<install-dir>/state/external_projects.json`
-- API keys: `<install-dir>/secrets/secrets.json`
+- 桌面端用户数据根目录：Tauri `app_data_dir`（Windows AppData/Roaming / macOS Application Support / Linux XDG Data Home），子目录为 `com.iriscreation.desktop`
+- App settings: `<app-data>/config/settings.json`
+- Writing assistants: `<app-data>/data/agents.json`
+- Chat history: `<app-data>/data/chat_history.json`
+- Bookshelf state: `<app-data>/state/last_workspace.json`, `<app-data>/state/external_projects.json`
+- API keys: `<app-data>/secrets/secrets.json`
+- 默认新建作品：`<app-data>/projects/`
 
-服务端 / 开发环境可用 `IRIS_CREATION_DATA_DIR` 指定数据根目录、`IRIS_CREATION_SKILLS_DIR` 指定技能库目录（默认自动探测可执行文件旁或仓库内 `skills/`，编译期另有一份内嵌兜底）。
+可用 `IRIS_CREATION_DATA_DIR` 指定数据根目录、`IRIS_CREATION_STATIC_DIR` 指定前端目录；显式指定数据目录时不自动导入历史配置。开发 UI 地址为 `http://localhost:1421`，开发态 RPC 固定使用 `127.0.0.1:8765`；打包态会记住可用端口，冲突时寻找其他端口。主题和恢复草稿按浏览器来源隔离，端口改变时不会自动迁移这些临时状态；工程文件与服务端设置不受影响。技能库可用 `IRIS_CREATION_SKILLS_DIR` 指定（默认自动探测可执行文件旁或仓库内 `skills/`，编译期另有一份内嵌兜底）。
 
 ## 许可证
 

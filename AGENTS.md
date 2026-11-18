@@ -14,7 +14,9 @@ Iris-Creation 是一个基于 **Tauri v2 + React + Lexical** 构建的桌面小�
 
 ```bash
 # 开发
-pnpm run dev              # 仅启动前端开发服务器（端口 1420）
+pnpm install --frozen-lockfile
+pnpm --dir webui install --frozen-lockfile  # webui 是独立 lockfile，不在根 pnpm workspace
+pnpm run dev              # 仅启动前端开发服务器（端口 1421）
 pnpm run tauri:dev        # 完整桌面开发模式（推荐）
 
 # 构建
@@ -24,7 +26,7 @@ pnpm run tauri:build      # 构建桌面应用
 # 测试与代码检查
 pnpm run test             # 运行 Vitest 测试
 pnpm run test:watch       # 监视模式运行测试
-pnpm run lint             # 运行 ESLint
+pnpm run lint             # TypeScript 类型检查
 
 # 移动端（如需要）
 pnpm run tauri:android:dev
@@ -37,7 +39,9 @@ pnpm run tauri:ios:dev
 
 `src-react/`（旧桌面端 Lexical 前端）已于 2026-11 退役删除，`webui/` 是唯一前端。要点：
 
-- **`api/backend.ts`** - 类型化 RPC 命令绑定（与 `rpc_dispatch.rs` 一一对应）
+- **`api/backend.ts`** - 类型化 RPC 命令绑定（与 `rpc_dispatch.rs` 一一对应）；普通 `write_text` 给 Agent/系统写文件，编辑器用 `write_text_if_current` 提交时由服务端校验基线，冲突不会静默覆盖
+- **`api/health.ts`** - 本地后端启动探测、短超时和有限退避；App 启动门显示连接进度、重试和可复制诊断信息
+- **`api/editorDraft.ts`** - 编辑草稿崩溃恢复 envelope 与 baseline 对比；localStorage 只暂存，不替代工程文件保存
 - **`api/novel.ts`** - 作品内数据层：章节元数据、人物卡、设定集 Codex、情节线、记忆索引、写作历史、章节排序（Markdown/JSON 直读直写，`parseCharacters`/`parsePlotLines`/`parseCodex` 等纯函数有单测）；工坊结果直写章节（`chapterBodyFromResult` 剥 AI 首行标题 + `createChapterWithContent` 落盘登记）
 - **`api/planner.ts`** - 规划队列：run-queue.md JSON frontmatter 读写 + 大纲→任务链导入（`parseOutlineChapters`/`outlineToTasks`，与旧桌面端格式兼容）；AI 拆解（`buildTaskDraftPrompt`+`parseAiTasks`，id/依赖链重建防 AI 输出不可信字段）；UI 在 ToolsDialog「任务队列」页签（拆解/导入/逐章生成/连续生成）
 - **`api/stylefp.ts`** - 文风指纹持久化（concept/style-fingerprint.json，随工程走）：工坊学习一次全工程共用——StudioDialog 学/存/删，PlannerTab 逐章生成自动携带
@@ -54,7 +58,7 @@ pnpm run tauri:ios:dev
 - **`api/rpc.ts`** - Web RPC 客户端 + WS 事件订阅：流式事件走全局共享 WS 连接（`subscribeStreamEvents`，多流并发不漏帧；旧的 `subscribeEvent` 每订阅一条连接仅限低频事件使用）
 - **`features/launch/`** - 启动页：继续上次工程（last_workspace + 书架统计）、点选式目录选择器（`browse_dir`/`quick_locations`，拒绝手输路径）、新建标准工程
 - **`features/agent/`** - Agent 工作台（2026-11 重构，主流 Agent 布局，视觉规范：实体表面+SVG 图标，禁 emoji/玻璃拟态/胶囊按钮）：
-  - `AgentWorkspace.tsx` - 三栏主体：会话侧栏 | 中央对话流 | Artifacts 文件面板
+  - `AgentWorkspace.tsx` - 三栏主体：会话侧栏 | 中央对话流 | Artifacts 文件面板；草稿 700ms 本地暂存、恢复确认、beforeunload 保护与专注模式；写入前校验磁盘基线，冲突时选择载入/覆盖；Ctrl/Cmd+S 保存并显示状态
   - `SessionSidebar.tsx` - 历史会话（`list/get/save_chat_session`，按工程过滤，标题自动取首条用户消息）
   - `Markdown.tsx` - 零依赖 Markdown 渲染器（围栏代码块/表格/列表/行内格式，有单测）
   - `StepCard.tsx` - 工具步骤卡（订阅 `ai_agent_step` WS 事件，Cline 式可折叠）
@@ -82,9 +86,12 @@ pnpm run tauri:ios:dev
 ### 后端 (`src-tauri/src/`)
 
 - **`lib.rs`** - 共享库：桌面（Tauri）与 `iris-creation-server` 共用的服务层
-- **`main.rs`** - Tauri 桌面壳入口：setup 内嵌 `iris_creation::server::run`（127.0.0.1:8765），窗口直接加载该地址，与独立 iris-creation-server 形态行为一致；invoke 通道保留但 webui 不使用
+- **`main.rs`** - Tauri 桌面壳入口：资源目录加载随包 `frontend/`、系统应用数据目录迁移旧设置、绑定本机 RPC/WS 后再显示窗口；开发态用 Vite devUrl，发行态启动本地 HTTP 服务后导航到实际绑定地址
+- **`desktop.rs`** - 发布启动辅助：前端资源路径校验（不依赖当前工作目录）、仅补迁移旧配置且不覆盖现有设置/密钥/书架、不移动作品文件；含回归单测
+- 模式判断使用 `tauri::is_dev()`，不能使用 `debug_assertions`（`tauri build --debug` 也是打包模式）。Windows 安装不强制切换盘符。
 - **`bin/iris-creation-server.rs`** - 本地 Web 服务端入口：托管 webui 静态资源 + RPC + WS
 - **`server/`** - HTTP/WS 服务：`rpc_dispatch.rs`（66 命令分发分支，72 个命令名含 6 组新旧别名）、WS 升级与 cancel 指令
+- **桌面启动回归** - `tests/desktop_startup.rs` 验证打包式前端目录、空闲端口启动、health/RPC/SPA/静态资源与资源缺失错误
 - **`commands.rs`** - 命令实现（`*_impl` 共用函数供 Tauri/RPC 双通道调用）
 - **`agent_system.rs`** - AI 代理运行时，包含工具注册表和记忆存储
 - **`skills/mod.rs`** - 写作技能：内置技能 + Novelist-Skills 子模块（`skills/` 目录，编译期内嵌 + 运行时目录覆盖）
@@ -105,11 +112,12 @@ pnpm run tauri:ios:dev
 
 ### 应用数据位置
 
-- 设置： `<install-dir>/config/settings.json`
-- 写作助手： `<install-dir>/data/agents.json`
-- 聊天历史： `<install-dir>/data/chat_history.json`
-- 书架状态： `<install-dir>/state/last_workspace.json`, `<install-dir>/state/external_projects.json`
-- API 密钥： `<install-dir>/secrets/secrets.json`
+- 桌面端根目录：系统用户应用数据目录；server 可用 `IRIS_CREATION_DATA_DIR` 覆盖
+- 设置： `<app-data>/config/settings.json`
+- 写作助手： `<app-data>/data/agents.json`
+- 聊天历史： `<app-data>/data/chat_history.json`
+- 书架状态： `<app-data>/state/last_workspace.json`, `<app-data>/state/external_projects.json`
+- API 密钥： `<app-data>/secrets/secrets.json`
 
 ## 关键技术细节
 
@@ -163,6 +171,7 @@ pnpm exec vite            # dev 服务器端口 1421，/api /ws 代理到 8765
 ```
 
 - 运行方式：`./src-tauri/target/debug/iris-creation-server --port 8765 --static-dir webui/dist --data-dir <data>`（Rust 改动后需 `CARGO_HTTP_PROXY='' cargo build --bin iris-creation-server` 并重启）
+- Tauri 桌面发布版把 `webui/dist/` 映射到资源目录 `frontend/`，服务从 Tauri resource_dir 读取；所有相对路径不依赖启动 CWD。桌面用户数据使用 OS 应用数据目录；桌面启动回归为 `cargo test --manifest-path src-tauri/Cargo.toml --test desktop_startup`
 - RPC：`POST /api/rpc/{cmd}` 返回 `{ok}|{err}`，全部命令绑定在 `webui/src/api/backend.ts`（新增命令改 `src-tauri/src/server/rpc_dispatch.rs` 后在此扩展）
 - `export_work`：合并 stories/ 全章导出 md/txt（剥 frontmatter 与首个标题防重复，元数据 title 优先）
 - `delete_chat_session`：保留式删除（四通道：service/Tauri/dispatch/backend.ts）

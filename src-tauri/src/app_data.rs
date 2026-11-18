@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// 存储根目录 override（由 server 启动参数或环境变量设置）。
-/// 桌面端默认不设置，沿用可执行文件所在目录；server 端通过
-/// `IRIS_CREATION_DATA_DIR` 或 `--data-dir` 指向与桌面端相同的目录，
+/// 桌面端设置为系统用户数据目录，避免安装目录只读；server 端通过
+/// `IRIS_CREATION_DATA_DIR` 或 `--data-dir` 指向相同的目录，
 /// 以共享 settings/secrets/chat_history/bookshelf 状态。
 static STORAGE_ROOT_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
@@ -41,7 +41,7 @@ fn storage_dir(category: &str) -> Result<PathBuf, String> {
   Ok(storage_root_dir()?.join(category))
 }
 
-fn storage_root_dir() -> Result<PathBuf, String> {
+pub(crate) fn storage_root_dir() -> Result<PathBuf, String> {
   if let Some(dir) = STORAGE_ROOT_OVERRIDE.get() {
     return Ok(dir.clone());
   }

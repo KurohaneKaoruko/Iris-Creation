@@ -78,6 +78,9 @@
 }
 
 .launch-resume-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -205,6 +208,15 @@
   margin-bottom: 10px;
   padding-left: 4px;
 }
+
+.launch-recent-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.launch-recent-head > div { display: flex; align-items: baseline; gap: 8px; }
+.launch-recent-head h3 { margin: 0; }
+.launch-recent-head > div > span { color: var(--text-muted); font-size: 11px; }
+.launch-recent-search { display: flex; align-items: center; gap: 7px; width: min(260px, 48%); padding: 0 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); background: var(--bg-secondary); }
+.launch-recent-search:focus-within { border-color: var(--accent); }
+.launch-recent-search input { min-width: 0; width: 100%; padding: 7px 0; border: 0; outline: 0; background: transparent; box-shadow: none; font-size: 12px; }
+.launch-recent-empty, .launch-recent-more { padding: 13px; color: var(--text-muted); font-size: 12px; text-align: center; }
 
 .launch-recent-list {
   display: grid;
