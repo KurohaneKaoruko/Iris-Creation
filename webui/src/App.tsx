@@ -80,7 +80,7 @@ function Shell() {
 
   return (
     <>
-      {workRoot ? <AgentWorkspace /> : <LaunchScreen />}
+      {workRoot ? <AgentWorkspace key={workRoot} /> : <LaunchScreen />}
       {error ? (
         <div className="toast-error glass-float" role="alert" onClick={() => setError(null)}>
           {error}

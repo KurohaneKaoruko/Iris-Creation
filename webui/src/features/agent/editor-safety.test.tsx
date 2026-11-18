@@ -17,7 +17,9 @@ vi.mock('../../api/backend', async (original) => ({
   readText: state.readText, writeTextIfCurrent: state.write, writeText: state.forceWrite,
   getSkills: async () => [], getAppSettings: async () => ({ providers: [] }),
   listChatSessions: async () => [],
-  listWorkspaceTree: async () => ({ name: 'test', kind: 'dir', path: '', children: [] }),
+  listWorkspaceTree: async () => ({ name: 'test', kind: 'dir', path: '', children: [{ name: 'stories', kind: 'dir', path: 'stories', children: [
+    { name: 'one.md', kind: 'file', path: 'stories/one.md' }, { name: 'two.md', kind: 'file', path: 'stories/two.md' },
+  ] }] }),
 }))
 vi.mock('../../api/rpc', async (original) => ({
   ...await original<typeof import('../../api/rpc')>(),
@@ -41,6 +43,12 @@ function button(text: string): HTMLButtonElement {
   return result
 }
 async function click(text: string) { await act(async () => button(text).click()) }
+async function typeInput(input: HTMLInputElement, text: string) {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
 async function edit(text: string) {
   await click('预览')
   await click('编辑')
@@ -125,5 +133,108 @@ describe('editor safety interactions', () => {
     expect(container.querySelector('.agw-focus-mode')).not.toBeNull()
     await click('退出专注')
     expect(container.querySelector('.agw-focus-mode')).toBeNull()
+  })
+
+  it('guards a quick-open navigation instead of losing the current draft', async () => {
+    const editor = await edit('未保存草稿')
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true })))
+    const input = container.querySelector<HTMLInputElement>('[aria-label="文件名、章节标题或路径"]')!
+    expect(input).not.toBeNull()
+    await typeInput(input, 'two')
+    await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+    expect(container.querySelector('[role="alertdialog"]')).not.toBeNull()
+    expect(document.activeElement).toBe(button('继续编辑'))
+    expect(state.setActivePath).not.toHaveBeenCalled()
+    await click('继续编辑')
+    expect(editor.value).toBe('未保存草稿')
+    expect(document.activeElement).toBe(editor)
+  })
+
+  it('opens a hit in the already loaded file and selects its exact text for editing', async () => {
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true })))
+    await click('全文检索')
+    await typeInput(container.querySelector<HTMLInputElement>('[aria-label="全文检索关键词"]')!, '原稿')
+    await click('搜索')
+    await act(async () => container.querySelector<HTMLButtonElement>('[title="stories/one.md:2"]')!.click())
+    expect(container.querySelector('[data-source-line="2"] mark')?.textContent).toBe('原稿')
+    await click('编辑此处')
+    const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="正文编辑器"]')!
+    expect(editor.value.slice(editor.selectionStart, editor.selectionEnd)).toBe('原稿')
+  })
+
+  it('retains results and jumps within a dirty draft without discarding it', async () => {
+    state.disk = '# 正文\n原稿一\n\n原稿二'
+    const editor = await edit(`${state.disk}\n还未保存`)
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true })))
+    await click('全文检索')
+    await typeInput(container.querySelector<HTMLInputElement>('[aria-label="全文检索关键词"]')!, '原稿')
+    await click('搜索')
+    await act(async () => container.querySelector<HTMLButtonElement>('[title="stories/one.md:2"]')!.click())
+    expect(container.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(editor.selectionStart).toBe(editor.value.indexOf('原稿一'))
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true })))
+    await click('全文检索')
+    await act(async () => container.querySelector<HTMLButtonElement>('[title="stories/one.md:4"]')!.click())
+    expect(editor.selectionStart).toBe(editor.value.indexOf('原稿二'))
+    expect(editor.value).toContain('还未保存')
+    expect(state.write).not.toHaveBeenCalled()
+  })
+
+  it('ignores read-only watcher notifications and notices writes in a mixed batch', async () => {
+    await click('预览')
+    state.readText.mockClear()
+    await act(async () => {
+      state.events.get('fs_changed')?.({ path: 'stories/one.md', kind: 'access' })
+      await vi.advanceTimersByTimeAsync(650)
+    })
+    expect(state.readText).not.toHaveBeenCalled()
+    state.disk = '新的磁盘内容'
+    await act(async () => {
+      state.events.get('fs_changed')?.({ path: 'stories/one.md', kind: 'modify' })
+      state.events.get('fs_changed')?.({ path: 'stories/two.md', kind: 'modify' })
+      await vi.advanceTimersByTimeAsync(650)
+    })
+    expect(container.querySelector('.mdv')?.textContent).toBe('新的磁盘内容')
+  })
+
+  it('keeps keyboard find focused and advances through overlapping matches', async () => {
+    const editor = await edit('aaaa')
+    await act(async () => editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true })))
+    const input = container.querySelector<HTMLInputElement>('[aria-label="在正文中查找"]')!
+    await typeInput(input, 'aa')
+    expect(document.activeElement).toBe(input)
+    expect([editor.selectionStart, editor.selectionEnd]).toEqual([0, 2])
+    await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+    expect([editor.selectionStart, editor.selectionEnd]).toEqual([1, 3])
+    expect(container.querySelector('.agw-find-count')?.textContent).toBe('2/3')
+  })
+
+  it('recounts matches without moving the caret while writing', async () => {
+    const editor = await edit('钥匙在左边。')
+    const find = () => act(async () => editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true })))
+    await find()
+    const input = container.querySelector<HTMLInputElement>('[aria-label="在正文中查找"]')!
+    await typeInput(input, '钥匙')
+    const draft = '钥匙在左边。钥匙不见了。'
+    await act(async () => {
+      editor.focus()
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(editor, draft)
+      editor.setSelectionRange(draft.length, draft.length)
+      editor.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(document.activeElement).toBe(editor)
+    expect(editor.selectionStart).toBe(draft.length)
+    expect(container.querySelector('.agw-find-count')?.textContent).toBe('2 处')
+    await find()
+    expect(document.activeElement).toBe(input)
+  })
+
+  it('closes the command dialog with Escape without leaving focus mode', async () => {
+    await click('专注写作')
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true })))
+    const input = container.querySelector<HTMLInputElement>('[aria-label="搜索命令"]')!
+    await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+    expect(container.querySelector('[aria-label="命令面板"]')).toBeNull()
+    expect(container.querySelector('.agw-focus-mode')).not.toBeNull()
   })
 })

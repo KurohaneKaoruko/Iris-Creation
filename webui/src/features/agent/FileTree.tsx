@@ -1,5 +1,6 @@
 import { useState, type MouseEvent } from 'react'
 import type { FsEntry } from '../../api/backend'
+import { isHiddenWorkspaceEntry, isTextDocument } from '../../api/documents'
 import { Icon } from '../../components/Icon'
 import './FileTree.css'
 
@@ -28,10 +29,9 @@ function NodeView({
 }: FileTreeProps & { depth: number }) {
   const [open, setOpen] = useState(depth < 2)
   const isDir = entry.kind === 'dir'
-  const hidden = entry.name === '.novel' || entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'target'
-  if (hidden) return null
+  if (depth > 0 && isHiddenWorkspaceEntry(entry.name)) return null
 
-  const openable = !isDir && /\.(md|markdown|txt)$/i.test(entry.name)
+  const openable = !isDir && isTextDocument(entry.name)
   const stop = (e: MouseEvent, fn: () => void) => {
     e.stopPropagation()
     fn()

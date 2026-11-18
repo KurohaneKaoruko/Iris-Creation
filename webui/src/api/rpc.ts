@@ -13,11 +13,12 @@ export class RpcError extends Error {
   }
 }
 
-export async function rpc<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+export async function rpc<T>(command: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${BASE}/api/rpc/${command}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(args ?? {}),
+    signal,
   })
   if (!res.ok && res.status === 403) {
     throw new RpcError(command, 'forbidden origin: 请从本机地址访问服务')

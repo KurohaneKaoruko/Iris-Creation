@@ -4,6 +4,7 @@
  */
 import { readText, writeText, listWorkspaceTree, type FsEntry } from './backend'
 import { rpc } from './rpc'
+import { CHAPTER_METADATA_PATH as CH_META } from './documents'
 
 // ============ 章节（.novel/.settings/chapters.json + stories/） ============
 
@@ -20,8 +21,6 @@ export type Chapter = {
 }
 
 type ChapterMetadata = { chapters: Chapter[] }
-
-const CH_META = '.novel/.settings/chapters.json'
 
 function words(text: string): number {
   return text.replace(/\s/g, '').length

@@ -2,6 +2,7 @@
  * 章节编辑器内查找纯函数层：命中位置序列计算 + 循环导航。
  * 与 UI 解耦（不触碰 DOM/React），供 AgentWorkspace 查找条与单测共用。
  */
+import { escapeRegExp } from './search'
 
 /** 文本中的单个命中：selectionStart/End 直接可用于 textarea.setSelectionRange */
 export type FindHit = { start: number; end: number }
@@ -9,21 +10,16 @@ export type FindHit = { start: number; end: number }
 /**
  * 计算 needle 在 haystack 中的全部命中位置（大小写不敏感可关）。
  * 重叠命中也逐一列出（步进 1，如「aaa」找「aa」得 [0,1] 两处）；
- * 空 needle 返回空序列。原始 needle（非 lowercase 视图）长度作命中宽度，
- * 保证中文等无大小写变化的文本长度一致。
+ * 直接在原文匹配，避免整份文件 lowercase 后部分 Unicode 字符长度变化导致选区错位。
  */
 export function findHits(haystack: string, needle: string, caseSensitive = false): FindHit[] {
   if (!needle) return []
-  const h = caseSensitive ? haystack : haystack.toLowerCase()
-  const n = caseSensitive ? needle : needle.toLowerCase()
-  const width = needle.length
+  const pattern = new RegExp(escapeRegExp(needle), caseSensitive ? 'g' : 'gi')
   const out: FindHit[] = []
-  let from = 0
-  while (true) {
-    const idx = h.indexOf(n, from)
-    if (idx < 0) break
-    out.push({ start: idx, end: idx + width })
-    from = idx + 1
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(haystack))) {
+    out.push({ start: match.index, end: match.index + match[0].length })
+    pattern.lastIndex = match.index + 1
   }
   return out
 }

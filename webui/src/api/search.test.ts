@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   SEARCH_SCOPES,
   SEARCH_BATCH_SIZE,
@@ -11,6 +11,7 @@ import {
   splitHighlight,
   matchInContent,
   searchFiles,
+  locateSearchMatch,
   type FsEntryLike,
 } from './search'
 import type { FsEntry } from './backend'
@@ -77,6 +78,15 @@ describe('collectScopeFiles（范围收集）', () => {
     expect(files).toContain('outline/v1.md')
     expect(files).not.toContain('.novel/x.md')
     expect(files).not.toContain('README.md')
+  })
+
+  it('skips hidden and generated directories inside a writing scope', () => {
+    const scope: FsEntry = { name: 'stories', path: 'stories', kind: 'dir', children: [
+      { name: '.scratch', path: 'stories/.scratch', kind: 'dir', children: [{ name: 'draft.md', path: 'stories/.scratch/draft.md', kind: 'file' }] },
+      { name: 'target', path: 'stories/target', kind: 'dir', children: [{ name: 'built.md', path: 'stories/target/built.md', kind: 'file' }] },
+      { name: 'chapter.md', path: 'stories/chapter.md', kind: 'file' },
+    ] }
+    expect(collectScopeFiles({ name: '.work', path: '', kind: 'dir', children: [scope] }, ['stories'])).toEqual(['stories/chapter.md'])
   })
 })
 
@@ -214,13 +224,13 @@ describe('searchFiles（分批搜索）', () => {
 
   it('取消信号中止剩余扫描', async () => {
     const files = mk(200)
-    const signal = { cancelled: false }
+    const controller = new AbortController()
     let reads = 0
     const r = await searchFiles(files, async () => {
       reads += 1
-      if (reads >= SEARCH_BATCH_SIZE) signal.cancelled = true
+      if (reads >= SEARCH_BATCH_SIZE) controller.abort()
       return ''
-    }, '命中', { batchSize: SEARCH_BATCH_SIZE, signal })
+    }, '命中', { batchSize: SEARCH_BATCH_SIZE, signal: controller.signal })
     expect(r.cancelled).toBe(true)
     expect(reads).toBeLessThan(files.length)
   })
@@ -239,6 +249,30 @@ describe('searchFiles（分批搜索）', () => {
     expect(r.hits).toHaveLength(1)
     expect(r.hits[0].path).toBe('ok.md')
     expect(r.scanned).toBe(2)
+    expect(r.failed).toBe(1)
+  })
+
+  it('aborts outstanding reads and never starts another batch', async () => {
+    const controller = new AbortController()
+    const reader = vi.fn((_path: string, signal?: AbortSignal) => new Promise<string>((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true })
+    }))
+    const task = searchFiles(['one', 'two', 'three'], reader, 'match', { batchSize: 2, signal: controller.signal })
+    expect(reader).toHaveBeenCalledTimes(2)
+    controller.abort()
+    expect(await task).toMatchObject({ scanned: 0, cancelled: true, failed: 0 })
+    expect(reader).toHaveBeenCalledTimes(2)
+  })
+
+  it('passes immutable incremental results to the UI', async () => {
+    const snapshots: number[] = []
+    await searchFiles(['one', 'two'], async () => 'match', 'match', { batchSize: 1, onProgress: (progress) => snapshots.push(progress.hits.length) })
+    expect(snapshots).toEqual([1, 2])
+  })
+
+  it('rejects read errors when requested and does not hang with an invalid batch size', async () => {
+    await expect(searchFiles(['bad'], async () => { throw new Error('permission denied') }, 'x', { ignoreErrors: false })).rejects.toThrow('permission denied')
+    expect((await searchFiles(['one'], async () => 'match', 'match', { batchSize: 0 })).hits).toHaveLength(1)
   })
 
   it('onProgress 汇报进度', async () => {
@@ -246,6 +280,20 @@ describe('searchFiles（分批搜索）', () => {
     const prog: number[] = []
     await searchFiles(files, async () => '', 'q', { batchSize: SEARCH_BATCH_SIZE, onProgress: (p) => prog.push(p.scanned) })
     expect(prog).toEqual([SEARCH_BATCH_SIZE, SEARCH_BATCH_SIZE * 2])
+  })
+})
+
+describe('locateSearchMatch', () => {
+  it('locates UTF-16 textarea offsets after CRLF and Chinese characters', () => {
+    expect(locateSearchMatch('开篇\r\n前文 🌙 钥匙\r\n收尾', { line: 2, query: '钥匙', caseSensitive: false })).toEqual({ line: 2, start: 9, end: 11, matched: true })
+  })
+  it('uses the saved case rule and does not select an unrelated replacement', () => {
+    expect(locateSearchMatch('one\nSword', { line: 2, query: 'sword', caseSensitive: false })).toMatchObject({ start: 4, end: 9, matched: true })
+    expect(locateSearchMatch('one\nSword', { line: 2, query: 'sword', caseSensitive: true })).toMatchObject({ start: 4, end: 4, matched: false })
+    expect(locateSearchMatch('one\nchanged', { line: 2, query: 'old text', caseSensitive: false })).toMatchObject({ start: 4, end: 4, matched: false })
+  })
+  it('clamps deleted/out-of-range lines to a safe caret', () => {
+    expect(locateSearchMatch('one\ntwo', { line: 20, query: 'two', caseSensitive: false })).toEqual({ line: 2, start: 4, end: 4, matched: false })
   })
 })
 

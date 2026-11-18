@@ -42,6 +42,10 @@ describe('findHits（命中位置序列）', () => {
       { start: 3, end: 5 },
     ])
   })
+
+  it('uses original UTF-16 offsets after a case-expanding character and matches literal punctuation', () => {
+    expect(findHits('İ A.B 🌙 a.b', 'a.b')).toEqual([{ start: 2, end: 5 }, { start: 9, end: 12 }])
+  })
 })
 
 describe('nextHit（循环导航）', () => {

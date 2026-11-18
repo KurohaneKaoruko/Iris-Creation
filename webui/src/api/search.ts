@@ -4,6 +4,7 @@
  * 不含 .novel/ 等工程内部目录。千章级工程按批搜索、批间让出主线程，避免 UI 冻结。
  * 文件读取由调用方注入（RPC read_text），本模块保持零 IO 可单测。
  */
+import { isHiddenWorkspaceEntry, isTextDocument } from './documents'
 
 /** collectScopeFiles 的宽松输入类型（测试可用普通对象模拟 FsEntry） */
 export type FsEntryLike = {
@@ -22,7 +23,7 @@ export const SEARCH_SCOPES: Array<{ id: SearchScope; zh: string }> = [
 ]
 
 /** 每批搜索的文件数：批间让出主线程 */
-export const SEARCH_BATCH_SIZE = 50
+export const SEARCH_BATCH_SIZE = 8
 
 /** 单文件命中行数上限（防单文件刷屏） */
 export const MAX_HITS_PER_FILE = 20
@@ -53,6 +54,29 @@ export type SearchOptions = {
   caseSensitive?: boolean
 }
 
+/** 检索结果保留提交时的关键词和规则，不使用后来输入的新词。 */
+export type SearchLocation = { line: number; query: string; caseSensitive: boolean }
+
+/** 按当前文本定位命中；命中已失效时只定位该行，不再选中无关文字。偏移使用 textarea 的 LF 文本。 */
+export function locateSearchMatch(content: string, target: SearchLocation) {
+  const text = content.replace(/\r\n?/g, '\n')
+  const requested = Math.max(1, Math.trunc(target.line))
+  let start = 0
+  let line = 1
+  let next = text.indexOf('\n')
+  while (line < requested && next !== -1) {
+    start = next + 1
+    line += 1
+    next = text.indexOf('\n', start)
+  }
+  const current = text.slice(start, next === -1 ? undefined : next)
+  const match = line === requested && isValidQuery(target.query)
+    ? new RegExp(escapeRegExp(target.query.trim()), target.caseSensitive ? '' : 'i').exec(current)
+    : null
+  if (!match) return { line, start, end: start, matched: false }
+  return { line, start: start + match.index, end: start + match.index + match[0].length, matched: true }
+}
+
 /** 正则元字符转义：用户输入一律按字面量搜索 */
 export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -68,12 +92,13 @@ export function collectScopeFiles(tree: FsEntryLike, scopes: SearchScope[]): str
   const prefixes = scopes.map((s) => `${s}/`)
   const out: string[] = []
   const walk = (e: FsEntryLike) => {
+    if (isHiddenWorkspaceEntry(e.name)) return
     if (e.kind === 'file') {
-      if (/\.(md|markdown|txt)$/i.test(e.path) && prefixes.some((p) => e.path.startsWith(p))) out.push(e.path)
+      if (isTextDocument(e.path) && prefixes.some((p) => e.path.startsWith(p))) out.push(e.path)
     }
     for (const c of e.children ?? []) walk(c)
   }
-  walk(tree)
+  for (const child of tree.children ?? []) walk(child)
   out.sort()
   return out
 }
@@ -113,11 +138,12 @@ export function matchInContent(
   opts: SearchOptions & { maxHits?: number; contextLines?: number } = {},
 ): SearchHit[] {
   if (!isValidQuery(query)) return []
+  const word = query.trim()
   const caseSensitive = opts.caseSensitive ?? false
   const maxHits = opts.maxHits ?? MAX_HITS_PER_FILE
   const ctx = opts.contextLines ?? CONTEXT_LINES
-  const lines = content.replace(/\r\n/g, '\n').split('\n')
-  const re = new RegExp(escapeRegExp(query.trim()), caseSensitive ? '' : 'i')
+  const lines = content.split(/\r\n?|\n/)
+  const re = new RegExp(escapeRegExp(word), caseSensitive ? '' : 'i')
   const hits: SearchHit[] = []
   for (let i = 0; i < lines.length && hits.length < maxHits; i++) {
     const idx = lines[i].search(re)
@@ -125,9 +151,9 @@ export function matchInContent(
     hits.push({
       path,
       line: i + 1,
-      text: truncateAround(lines[i], idx, query.trim().length),
-      before: lines.slice(Math.max(0, i - ctx), i),
-      after: lines.slice(i + 1, i + 1 + ctx),
+      text: truncateAround(lines[i], idx, word.length),
+      before: lines.slice(Math.max(0, i - ctx), i).map((line) => truncateAround(line, 0, 0)),
+      after: lines.slice(i + 1, i + 1 + ctx).map((line) => truncateAround(line, 0, 0)),
     })
   }
   return hits
@@ -138,11 +164,14 @@ export type SearchProgress = {
   total: number
   /** 已完成扫描数 */
   scanned: number
+  failed: number
+  hits: SearchHit[]
 }
 
 export type SearchRunResult = {
   hits: SearchHit[]
   scanned: number
+  failed: number
   /** 因达到 MAX_TOTAL_HITS 截断 */
   truncated: boolean
   /** 因取消信号中止 */
@@ -151,44 +180,56 @@ export type SearchRunResult = {
 
 /**
  * 分批搜索一批文件：readFile 由调用方注入（RPC read_text），
- * 每批之间 setTimeout(0) 让出主线程；signal.cancelled 置真即中止。
+ * 每批之间让出主线程；终止信号传给所有读取，取消后不再开始下一批。
  */
 export async function searchFiles(
   files: string[],
-  readFile: (path: string) => Promise<string>,
+  readFile: (path: string, signal?: AbortSignal) => Promise<string>,
   query: string,
   opts: SearchOptions & {
     batchSize?: number
-    /** 读取失败的文件静默跳过（默认 true） */
+    /** 读取失败时继续扫描并统计跳过数（默认 true） */
     ignoreErrors?: boolean
-    signal?: { cancelled: boolean }
+    signal?: AbortSignal
     onProgress?: (p: SearchProgress) => void
   } = {},
 ): Promise<SearchRunResult> {
-  const batchSize = opts.batchSize ?? SEARCH_BATCH_SIZE
+  const batchSize = Math.max(1, Math.trunc(opts.batchSize ?? SEARCH_BATCH_SIZE) || 1)
   const hits: SearchHit[] = []
   let scanned = 0
+  let failed = 0
   let truncated = false
-  if (!isValidQuery(query)) return { hits, scanned, truncated: false, cancelled: false }
-  for (let i = 0; i < files.length; i += batchSize) {
-    if (opts.signal?.cancelled) return { hits, scanned, truncated, cancelled: true }
+  if (!isValidQuery(query)) return { hits, scanned, failed, truncated, cancelled: false }
+  for (let i = 0; i < files.length && !opts.signal?.aborted; i += batchSize) {
     const batch = files.slice(i, i + batchSize)
-    const contents = await Promise.all(
-      batch.map((p) => readFile(p).catch((e) => (opts.ignoreErrors === false ? Promise.reject(e) : ''))),
-    )
+    const contents = await Promise.all(batch.map(async (path) => {
+      if (opts.signal?.aborted) return null
+      try {
+        return await readFile(path, opts.signal)
+      } catch (error) {
+        if (!opts.signal?.aborted && opts.ignoreErrors === false) throw error
+        return null
+      }
+    }))
+    if (opts.signal?.aborted) break
     for (let j = 0; j < batch.length; j++) {
       scanned += 1
-      hits.push(...matchInContent(batch[j], contents[j], query, opts))
+      const content = contents[j]
+      if (content === null) {
+        failed += 1
+        continue
+      }
+      hits.push(...matchInContent(batch[j], content, query, opts))
       if (hits.length >= MAX_TOTAL_HITS) {
+        truncated = hits.length > MAX_TOTAL_HITS || scanned < files.length
         hits.length = MAX_TOTAL_HITS
-        truncated = true
         break
       }
     }
-    opts.onProgress?.({ total: files.length, scanned })
-    if (truncated) break
+    opts.onProgress?.({ total: files.length, scanned, failed, hits: [...hits] })
+    if (hits.length === MAX_TOTAL_HITS) break
     // 让出主线程：批间延迟一次宏任务，UI 可响应输入与渲染
     if (i + batchSize < files.length) await new Promise((r) => setTimeout(r, 0))
   }
-  return { hits, scanned, truncated, cancelled: opts.signal?.cancelled ?? false }
+  return { hits, scanned, failed, truncated, cancelled: opts.signal?.aborted ?? false }
 }

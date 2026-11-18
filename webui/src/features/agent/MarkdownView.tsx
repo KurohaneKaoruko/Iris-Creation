@@ -1,167 +1,49 @@
-import { useMemo } from 'react'
+import { useMemo, type ReactNode } from 'react'
+import { markdownBlocks, type MarkdownBlock } from '../../api/markdown'
+import { splitHighlight, type SearchLocation } from '../../api/search'
 
-type MdViewProps = {
-  content: string
+export function MarkdownView({ content, location }: { content: string; location?: SearchLocation }) {
+  const blocks = useMemo(() => markdownBlocks(content), [content])
+  return <MarkdownBlocksView blocks={blocks} location={location} />
 }
 
-/** 从 Markdown 提取标题目录（h1-h3）：(层级, 文本, 锚点 id) */
-export function extractToc(content: string): Array<{ lvl: number; text: string; id: string }> {
-  const out: Array<{ lvl: number; text: string; id: string }> = []
-  let inFence = false
-  const seen = new Map<string, number>()
-  for (const line of content.split('\n')) {
-    if (line.trimStart().startsWith('```')) {
-      inFence = !inFence
-      continue
+export function MarkdownBlocksView({ blocks, location }: { blocks: MarkdownBlock[]; location?: SearchLocation }) {
+  const focus = location?.line
+  const text = (value: string, line: number) => line !== focus ? value : splitHighlight(value, location?.query ?? '', location?.caseSensitive)
+    .map((part, index) => part.hit ? <mark key={index} className="mdv-search-mark">{part.text}</mark> : part.text)
+
+  function inline(value: string, line: number) {
+    const result: ReactNode[] = []
+    const re = /(\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`)/g
+    let last = 0
+    let match: RegExpExecArray | null
+    while ((match = re.exec(value))) {
+      if (match.index > last) result.push(text(value.slice(last, match.index), line))
+      if (match[2]) result.push(<strong key={match.index}>{text(match[2], line)}</strong>)
+      else if (match[3]) result.push(<em key={match.index}>{text(match[3], line)}</em>)
+      else result.push(<code key={match.index} className="mdv-inline-code">{text(match[4], line)}</code>)
+      last = match.index + match[0].length
     }
-    if (inFence) continue
-    const h = line.match(/^(#{1,3})\s+(.+?)\s*$/)
-    if (!h) continue
-    const text = h[2].replace(/[*`_]/g, '').trim()
-    if (!text) continue
-    let id = `mdv-toc-${text}`
-    const n = seen.get(id) ?? 0
-    seen.set(id, n + 1)
-    if (n > 0) id = `${id}-${n}`
-    out.push({ lvl: h[1].length, text, id })
+    if (last < value.length) result.push(text(value.slice(last), line))
+    return result
   }
-  return out
-}
 
-/**
- * 轻量 Markdown 渲染：标题/列表/引用/代码块/粗斜体/分隔线。
- * 小说正文以段落为主，无需重型 md 库；渲染结果为纯只读视图。
- * 标题渲染带 mdv-toc-N 锚点 id（与 extractToc 对应），供 TOC 跳转。
- */
-export function MarkdownView({ content }: MdViewProps) {
-  const blocks = useMemo(() => parse(content), [content])
-  return <div className="mdv">{blocks}</div>
-}
-
-function parse(content: string): JSX.Element[] {
-  const lines = content.split('\n')
-  const out: JSX.Element[] = []
-  let i = 0
-  // 标题锚点去重计数（与 extractToc 同规则）
-  const seen = new Map<string, number>()
-  const anchorOf = (text: string): string => {
-    const clean = text.replace(/[*`_]/g, '').trim()
-    let id = `mdv-toc-${clean}`
-    const n = seen.get(id) ?? 0
-    seen.set(id, n + 1)
-    return n > 0 ? `${id}-${n}` : id
-  }
-  while (i < lines.length) {
-    const line = lines[i]
-
-    // 代码块
-    if (line.trimStart().startsWith('```')) {
-      const buf: string[] = []
-      i += 1
-      while (i < lines.length && !lines[i].trimStart().startsWith('```')) {
-        buf.push(lines[i])
-        i += 1
-      }
-      i += 1
-      out.push(
-        <pre key={out.length} className="mdv-code">
-          <code>{buf.join('\n')}</code>
-        </pre>,
-      )
-      continue
+  return <div className="mdv">{blocks.map((block) => {
+    const source = { 'data-source-start': block.start, 'data-source-end': block.end }
+    const lineClass = (line: number) => line === focus ? 'mdv-source-target' : undefined
+    if (block.kind === 'heading') {
+      const Tag = `h${block.level}` as 'h1'
+      return <Tag key={block.start} {...source} data-source-line={block.start} id={block.id} className={`mdv-h mdv-h${block.level} ${lineClass(block.start) ?? ''}`}>{inline(block.text, block.start)}</Tag>
     }
-
-    // 标题
-    const h = line.match(/^(#{1,6})\s+(.*)$/)
-    if (h) {
-      const lvl = h[1].length
-      const Tag = (`h${Math.min(lvl, 6)}` as unknown) as 'h1'
-      out.push(
-        <Tag key={out.length} id={anchorOf(h[2])} className={`mdv-h mdv-h${lvl}`}>
-          {inline(h[2])}
-        </Tag>,
-      )
-      i += 1
-      continue
+    if (block.kind === 'rule') return <hr key={block.start} {...source} data-source-line={block.start} className={`mdv-hr ${lineClass(block.start) ?? ''}`} />
+    if (block.kind === 'list') {
+      const List = block.ordered ? 'ol' : 'ul'
+      return <List key={block.start} {...source} className="mdv-list">{block.lines.map((line) => <li key={line.line} data-source-line={line.line} className={lineClass(line.line)}>{inline(line.text, line.line)}</li>)}</List>
     }
-
-    // 分隔线
-    if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
-      out.push(<hr key={out.length} className="mdv-hr" />)
-      i += 1
-      continue
-    }
-
-    // 引用
-    if (line.trimStart().startsWith('>')) {
-      const buf: string[] = []
-      while (i < lines.length && lines[i].trimStart().startsWith('>')) {
-        buf.push(lines[i].replace(/^\s*>\s?/, ''))
-        i += 1
-      }
-      out.push(<blockquote key={out.length} className="mdv-quote">{inline(buf.join(' '))}</blockquote>)
-      continue
-    }
-
-    // 列表
-    if (/^\s*[-*+]\s+/.test(line) || /^\s*\d+\.\s+/.test(line)) {
-      const ordered = /^\s*\d+\.\s+/.test(line)
-      const items: string[] = []
-      while (i < lines.length && (/^\s*[-*+]\s+/.test(lines[i]) || /^\s*\d+\.\s+/.test(lines[i]))) {
-        items.push(lines[i].replace(/^\s*(?:[-*+]|\d+\.)\s+/, ''))
-        i += 1
-      }
-      const List = ordered ? 'ol' : 'ul'
-      out.push(
-        <List key={out.length} className="mdv-list">
-          {items.map((it, j) => (
-            <li key={j}>{inline(it)}</li>
-          ))}
-        </List>,
-      )
-      continue
-    }
-
-    // 空行
-    if (!line.trim()) {
-      i += 1
-      continue
-    }
-
-    // 段落（连续非空非结构行）
-    const buf: string[] = [line]
-    i += 1
-    while (
-      i < lines.length &&
-      lines[i].trim() &&
-      !/^(#{1,6})\s/.test(lines[i]) &&
-      !/^\s*[-*+]\s+/.test(lines[i]) &&
-      !/^\s*\d+\.\s+/.test(lines[i]) &&
-      !lines[i].trimStart().startsWith('>') &&
-      !lines[i].trimStart().startsWith('```')
-    ) {
-      buf.push(lines[i])
-      i += 1
-    }
-    out.push(<p key={out.length} className="mdv-p">{inline(buf.join('\n'))}</p>)
-  }
-  return out
-}
-
-/** 行内格式：**粗** *斜* `码` */
-function inline(text: string) {
-  const parts: Array<string | JSX.Element> = []
-  const re = /(\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`)/g
-  let last = 0
-  let m: RegExpExecArray | null
-  let k = 0
-  while ((m = re.exec(text))) {
-    if (m.index > last) parts.push(text.slice(last, m.index))
-    if (m[2]) parts.push(<strong key={k++}>{m[2]}</strong>)
-    else if (m[3]) parts.push(<em key={k++}>{m[3]}</em>)
-    else if (m[4]) parts.push(<code key={k++} className="mdv-inline-code">{m[4]}</code>)
-    last = m.index + m[0].length
-  }
-  if (last < text.length) parts.push(text.slice(last))
-  return parts
+    if (block.kind === 'code') return <pre key={block.start} {...source} className="mdv-code"><code>{block.lines.map((line, index) => <span key={line.line} data-source-line={line.line} className={lineClass(line.line)}>{text(line.text, line.line)}{index < block.lines.length - 1 ? '\n' : ''}</span>)}</code></pre>
+    const children = block.lines.map((line, index) => <span key={line.line} data-source-line={line.line} className={lineClass(line.line)}>{inline(line.text, line.line)}{index < block.lines.length - 1 ? '\n' : ''}</span>)
+    return block.kind === 'quote'
+      ? <blockquote key={block.start} {...source} className="mdv-quote">{children}</blockquote>
+      : <p key={block.start} {...source} className="mdv-p">{children}</p>
+  })}</div>
 }

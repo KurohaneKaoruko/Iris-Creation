@@ -42,6 +42,8 @@ pnpm run tauri:ios:dev
 - **`api/backend.ts`** - 类型化 RPC 命令绑定（与 `rpc_dispatch.rs` 一一对应）；普通 `write_text` 给 Agent/系统写文件，编辑器用 `write_text_if_current` 提交时由服务端校验基线，冲突不会静默覆盖
 - **`api/health.ts`** - 本地后端启动探测、短超时和有限退避；App 启动门显示连接进度、重试和可复制诊断信息
 - **`api/editorDraft.ts`** - 编辑草稿崩溃恢复 envelope 与 baseline 对比；localStorage 只暂存，不替代工程文件保存
+- **`api/documents.ts`** - 文档索引、章节标题读取、文件名/标题/路径多关键词排序、工作区隔离的最近文档；排除隐藏/生成目录，同名引用有歧义时不得随意打开第一个
+- **`api/markdown.ts`** - 预览与目录共用的带源行块解析；支持 CRLF、反引号/波浪线围栏和重复标题锚点，检索定位必须使用源行，不能按渲染高度比例猜测
 - **`api/novel.ts`** - 作品内数据层：章节元数据、人物卡、设定集 Codex、情节线、记忆索引、写作历史、章节排序（Markdown/JSON 直读直写，`parseCharacters`/`parsePlotLines`/`parseCodex` 等纯函数有单测）；工坊结果直写章节（`chapterBodyFromResult` 剥 AI 首行标题 + `createChapterWithContent` 落盘登记）
 - **`api/planner.ts`** - 规划队列：run-queue.md JSON frontmatter 读写 + 大纲→任务链导入（`parseOutlineChapters`/`outlineToTasks`，与旧桌面端格式兼容）；AI 拆解（`buildTaskDraftPrompt`+`parseAiTasks`，id/依赖链重建防 AI 输出不可信字段）；UI 在 ToolsDialog「任务队列」页签（拆解/导入/逐章生成/连续生成）
 - **`api/stylefp.ts`** - 文风指纹持久化（concept/style-fingerprint.json，随工程走）：工坊学习一次全工程共用——StudioDialog 学/存/删，PlannerTab 逐章生成自动携带
@@ -50,7 +52,7 @@ pnpm run tauri:ios:dev
 - **`api/consistency.ts`** - 一致性检查：人物断档/情节线推进/伏笔回收/章节健康四维交叉核对
 - **`api/writing.ts`** - AI 写作工作流：续写/大纲/细纲/润色提示词构建 + 流式生成
 - **`api/studio.ts`** - 创作工坊工具集：16 个 AI 快捷创作工具（构思/写作/润改/实用四分类），prompt 模板化 + 纯净补全通道（`studio_complete_stream` RPC，不走 ReAct、不要求打开作品目录）；多稿对照（`generateVariants`，同输入 2-4 稿不同视角并排择优）；风格学习（`learnStyleFingerprint`+`parseStyleFingerprint`，范文 → 六维文风指纹注入所有文风类工具），有单测
-- **`api/search.ts`** - 作品级全文检索：stories/concept/outline 三范围搜索（正则元字符转义字面量匹配、大小写开关）；分批扫描（每批 50 文件、批间让出主线程，千章级不冻 UI）；命中带行号 + 单文件/总量上限防刷屏；`escapeRegExp`/`collectScopeFiles`/`matchInContent`/`searchFiles` 纯函数有单测；UI 在 ToolsDialog「检索」页签，点击直达文件并跳行
+- **`api/search.ts`** - 作品级全文检索：stories/concept/outline 三范围字面量搜索；每批 8 文件并让出主线程，`AbortSignal` 传至 RPC/fetch，停止/重搜/关闭弹层会终止在途读取；分批展示结果、统计读取失败、结果保留提交时的词/大小写/范围，避免输入改变后误标色；`locateSearchMatch` 将源行命中转换成编辑器选区
 - **`api/exportCenter.ts`** - 导出中心纯函数层：整本 TXT 前端组装（章节标题独立行 + `stripMarkdown` 去语法）、资料册合并（人物卡/设定集/情节线三区，`assembleDossier`）、备份快照报告（`assembleBackupReport` + `collectBackupFiles` 排除 exports/ + `sha256Hex` Web Crypto 校验值）、文件名净化与时间戳（`buildExportFilename`）；落盘统一走 `write_text` 到作品目录 `exports/`（`exports/backups/` 为备份），全部纯函数有单测
 - **`api/writingStats.ts`** - 写作会话统计纯函数：`recentWritingDays`（.novel 写作历史 → 最近 N 天零补位窗口）/`trendBarHeights`（趋势条高度归一）/`summarizeWritingDays`（按有产出天计日均）/`trendAxisLabels`，目标闭环：`isGoalHit`（单日达标判定）/`dayGoal`（逐日固化目标回退全局）/`streakGoalDays`（连续达标天数，今天未达标不断链），有单测；UI 在「作品统计」页签 30 天趋势条 + 每日目标设置（持久化 writing-history.json 既有 `dailyWordCount` 字段，`saveDailyGoal` 只增不改）；数据写入方为编辑器保存与任务队列逐章生成（`recordTodayWords` 按净增字数日累计）
 - **`api/loreGraph.ts`** - 人物关系图纯函数层：人物卡「关系」自由文本 → 边投影（`parseRelationSegments` 分隔符切段 + `buildRelationEdges` 括号注记剥取关系标签/双向合并/长名优先防误配）+ `loreGraphLayout` 确定性力导向布局（环形初始位 + 斥力/弹簧/向心迭代，无随机数同输入恒同输出，孤节点也落位），有单测；UI 在 LorePanel「关系图」页签（LoreGraph.tsx：SVG 节点/边、悬浮显关系描述、点击节点打开人物卡）
@@ -73,7 +75,9 @@ pnpm run tauri:ios:dev
   - `PlannerTab.tsx` - 任务队列页签（studio 纯净补全通道逐章生成 + 人物卡/前章结尾/文风指纹上下文 + lint 一级套路质检闸门不过即标待重试、连写遇拦截即停；手动添加任务/内联编辑细纲/批量重试/导出 Markdown 写作计划（`tasksToPlanMarkdown`）；`buildChapterPrompt`/`gateIssues` 纯函数有单测）
   - `StudioDialog.tsx` - 创作工坊（16 个 AI 快捷创作工具四分类；支持 initialText 预填——编辑器选中文本经浮动工具条直达润改；风格学习：范文提取六维文风指纹徽章可移除；多稿对照开关 2-4 稿不同视角选稿卡片；五个出口：复制 / 存为 studio/*.md / 存为章节（stories/chapter-XXXX.md 纳入章节管理）/ 插入编辑器 / 替换选区（编辑器有选区时出现，润改闭环）；Ctrl+K 有快捷入口）
   - `CommandPalette.tsx` - Ctrl+K 命令面板（模糊过滤/键盘导航）
-  - `MarkdownView.tsx` - 轻量只读渲染（标题锚点 + `extractToc` 纯函数 TOC，有单测）
+  - `QuickOpen.tsx` - Ctrl/Cmd+P 快速打开：按章节标题/文件名/路径检索，最近打开优先、最多 80 条渲染、键盘循环选择与 IME 守护；复用工作台未保存保护
+  - `FilePreview.tsx` - 目录与真实源行跳转，支持已打开文件重复定位；「编辑此处」在 textarea 选中命中原文，找不到旧词时只移动光标不误选
+  - `MarkdownView.tsx` - 轻量只读渲染（真实源行和标题锚点，目录与预览共享解析结果，有单测）
   - `DiffView.tsx` - 文件变更历史 diff（覆盖写自动留快照；LCS 行级对比、±统计、上下文折叠、版本恢复）
 - **`api/diff.ts`** - 零依赖行级 diff（LCS/collapseDiff，有单测）
 - **`api/sessionExport.ts`** - 会话导出 Markdown 分享稿（工具步骤 details 折叠，有单测）

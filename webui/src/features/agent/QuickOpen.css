@@ -1,0 +1,14 @@
+.quick-open { width: min(640px, 94vw); }
+.quick-open-input-row { display: flex; align-items: center; gap: 10px; padding: 0 12px 0 18px; border-bottom: 1px solid var(--border); color: var(--text-muted); }
+.quick-open-input-row .cmdk-input { flex: 1; min-width: 0; padding-inline: 0; border-bottom: 0; }
+.quick-open-input-row .cmdk-input:focus { box-shadow: none; }
+.quick-open .cmdk-list { max-height: min(420px, 58vh); }
+.quick-open-file { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.quick-open-file strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.quick-open-file > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 11px; }
+.quick-open-state { color: var(--accent); font-size: 11px; }
+.quick-open-foot { justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 620px) {
+  .quick-open-foot { font-size: 10px; }
+  .quick-open .cmdk-item { padding: 9px 8px; }
+}

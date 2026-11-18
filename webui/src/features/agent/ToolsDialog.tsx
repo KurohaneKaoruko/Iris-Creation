@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   listChapters,
   listCharacters,
@@ -19,6 +19,7 @@ import type { IconName } from '../../components/Icon'
 import { scanCharacterMentions } from '../../api/novel'
 import { splitIntoChapters, importSummary } from '../../api/import'
 import { readText } from '../../api/backend'
+import type { SearchLocation } from '../../api/search'
 import { Icon } from '../../components/Icon'
 import { PlannerTab } from './PlannerTab'
 import { SearchTab } from './SearchTab'
@@ -27,9 +28,9 @@ import { BackupTab } from './BackupTab'
 import './ToolsDialog.css'
 import './PlannerTab.css'
 
-type TabId = 'import' | 'consistency' | 'lint' | 'stats' | 'planner' | 'search' | 'export' | 'backup'
+export type ToolsTab = 'import' | 'consistency' | 'lint' | 'stats' | 'planner' | 'search' | 'export' | 'backup'
 
-const TABS: Array<{ id: TabId; label: string; icon: IconName }> = [
+const TABS: Array<{ id: ToolsTab; label: string; icon: IconName }> = [
   { id: 'search', label: '检索', icon: 'search' },
   { id: 'planner', label: '任务队列', icon: 'list-checks' },
   { id: 'stats', label: '作品统计', icon: 'chart' },
@@ -40,39 +41,71 @@ const TABS: Array<{ id: TabId; label: string; icon: IconName }> = [
   { id: 'import', label: '导入切章', icon: 'file-input' },
 ]
 
-type Props = { initialTab?: TabId; onClose: () => void; onOpenFile: (path: string, line?: number) => void }
+type Props = {
+  open: boolean
+  tab: ToolsTab
+  onTabChange: (tab: ToolsTab) => void
+  onClose: () => void
+  onOpenFile: (path: string, location?: SearchLocation) => void
+}
 
 /** 工具中心：全文检索 / 作品统计 / 导出 / 一致性检查 / 正文铁律体检 / 存量导入切章 / 任务队列 */
-export function ToolsDialog({ initialTab = 'planner', onClose, onOpenFile }: Props) {
-  const [tab, setTab] = useState<TabId>(initialTab)
-  const [visited, setVisited] = useState<Set<TabId>>(() => new Set([initialTab]))
-  const activateTab = useCallback((next: TabId) => {
-    setVisited((current) => new Set(current).add(next))
-    setTab(next)
-  }, [])
+export function ToolsDialog({ open, tab, onTabChange, onClose, onOpenFile }: Props) {
+  const [visited, setVisited] = useState<Set<ToolsTab>>(() => new Set())
+  const [keepSearch, setKeepSearch] = useState(false)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const searchVisible = open && tab === 'search'
+
+  useEffect(() => {
+    if (searchVisible) setKeepSearch(true)
+    if (open) setVisited((current) => current.has(tab) ? current : new Set(current).add(tab))
+    else setVisited((current) => current.size ? new Set() : current)
+  }, [open, tab, searchVisible])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const previous = document.activeElement as HTMLElement | null
+    closeRef.current?.focus()
+    return () => { if (previous?.isConnected && !previous.closest('.tools-dialog')) previous.focus() }
+  }, [open])
+
+  const present = (name: ToolsTab) => open && (tab === name || visited.has(name))
   return (
-    <div className="tools-overlay" onClick={onClose} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); onClose() } }}>
-      <div className="tools-dialog glass-panel" onClick={(e) => e.stopPropagation()}>
+    <div className="tools-overlay" hidden={!open} onClick={onClose} onKeyDown={(event) => {
+      if (event.defaultPrevented || event.nativeEvent.isComposing) return
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() }
+      if (event.key === 'Tab') {
+        const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button, input, textarea, select, a[href], [tabindex]')]
+          .filter((element) => element.tabIndex >= 0 && !element.matches(':disabled') && !element.closest('[hidden]'))
+        const edge = event.shiftKey ? controls[0] : controls.at(-1)
+        if (document.activeElement === edge) {
+          event.preventDefault()
+          const target = event.shiftKey ? controls.at(-1) : controls[0]
+          target?.focus()
+        }
+      }
+    }}>
+      <div className="tools-dialog glass-panel" role="dialog" aria-modal="true" aria-label="工具中心" onClick={(e) => e.stopPropagation()}>
         <div className="tools-head">
           <div className="tools-tabs">
             {TABS.map((t) => (
-              <button key={t.id} className={tab === t.id ? 'active' : ''} aria-pressed={tab === t.id} onClick={() => activateTab(t.id)}>
+              <button key={t.id} className={tab === t.id ? 'active' : ''} aria-pressed={tab === t.id} onClick={() => onTabChange(t.id)}>
                 <Icon name={t.icon} size={14} />
                 {t.label}
               </button>
             ))}
           </div>
-          <button className="tools-x" onClick={onClose} title="关闭"><Icon name="x" size={16} /></button>
+          <button ref={closeRef} className="tools-x" onClick={onClose} aria-label="关闭工具中心"><Icon name="x" size={16} /></button>
         </div>
         <div className="tools-body">
-          {visited.has('search') ? <div className="tools-tab-pane" hidden={tab !== 'search'}><SearchTab onOpenFile={onOpenFile} /></div> : null}
-          {visited.has('stats') ? <div className="tools-tab-pane" hidden={tab !== 'stats'}><StatsTab onOpenFile={onOpenFile} /></div> : null}
-          {visited.has('export') ? <div className="tools-tab-pane" hidden={tab !== 'export'}><ExportTab /></div> : null}
-          {visited.has('backup') ? <div className="tools-tab-pane" hidden={tab !== 'backup'}><BackupTab /></div> : null}
-          {visited.has('consistency') ? <div className="tools-tab-pane" hidden={tab !== 'consistency'}><ConsistencyTab onOpenFile={onOpenFile} /></div> : null}
-          {visited.has('lint') ? <div className="tools-tab-pane" hidden={tab !== 'lint'}><LintTab onOpenFile={onOpenFile} /></div> : null}
-          {visited.has('planner') ? <div className="tools-tab-pane" hidden={tab !== 'planner'}><PlannerTab onOpenFile={onOpenFile} /></div> : null}
-          {visited.has('import') ? <div className="tools-tab-pane" hidden={tab !== 'import'}><ImportTab /></div> : null}
+          {searchVisible || keepSearch ? <div className="tools-tab-pane" hidden={!searchVisible}><SearchTab onOpenFile={onOpenFile} dialogOpen={open} visible={searchVisible} /></div> : null}
+          {present('stats') ? <div className="tools-tab-pane" hidden={tab !== 'stats'}><StatsTab onOpenFile={onOpenFile} /></div> : null}
+          {present('export') ? <div className="tools-tab-pane" hidden={tab !== 'export'}><ExportTab /></div> : null}
+          {present('backup') ? <div className="tools-tab-pane" hidden={tab !== 'backup'}><BackupTab /></div> : null}
+          {present('consistency') ? <div className="tools-tab-pane" hidden={tab !== 'consistency'}><ConsistencyTab onOpenFile={onOpenFile} /></div> : null}
+          {present('lint') ? <div className="tools-tab-pane" hidden={tab !== 'lint'}><LintTab onOpenFile={onOpenFile} /></div> : null}
+          {present('planner') ? <div className="tools-tab-pane" hidden={tab !== 'planner'}><PlannerTab onOpenFile={onOpenFile} /></div> : null}
+          {present('import') ? <div className="tools-tab-pane" hidden={tab !== 'import'}><ImportTab /></div> : null}
         </div>
       </div>
     </div>

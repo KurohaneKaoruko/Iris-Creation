@@ -148,8 +148,8 @@ export const getLastWorkspace = () => rpc<string | null>('get_last_workspace')
 
 // ---- fs ----
 
-export const listWorkspaceTree = (maxDepth = 6) => rpc<FsEntry>('list_workspace_tree', { maxDepth })
-export const readText = (relativePath: string) => rpc<string>('read_text', { relativePath })
+export const listWorkspaceTree = (maxDepth = 6, signal?: AbortSignal) => rpc<FsEntry>('list_workspace_tree', { maxDepth }, signal)
+export const readText = (relativePath: string, signal?: AbortSignal) => rpc<string>('read_text', { relativePath }, signal)
 /** 导出整本：合并 stories/ 全部章节，返回 (文件名, 内容) */
 export const exportWork = (format: 'md' | 'txt' = 'md') =>
   rpc<{ filename: string; content: string }>('export_work', { format })

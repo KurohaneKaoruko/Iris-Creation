@@ -128,7 +128,7 @@
 }
 
 /* 给正文留出更舒展的阅读宽度；面板可折叠，窄屏自动改抽屉。 */
-.agw-file-body > .mdv { max-width: 900px; margin: 0 auto; padding: 26px clamp(22px, 5vw, 72px); font-size: 15px; line-height: 1.95; }
+.agw-file-body .mdv { max-width: 900px; margin: 0 auto; padding: 26px clamp(18px, 3vw, 48px); font-size: 15px; line-height: 1.95; }
 .agw-mobile-close { display: none; }
 .agw-mobile-scrim { display: none; }
 
@@ -923,7 +923,7 @@
 @media (max-width: 620px) {
   .agw-head { gap: 2px; padding-inline: 5px; }
   .agw-name { max-width: 22vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .agw-badge, .agw-head-sep, .agw-head > .agw-iconbtn:nth-of-type(2), .agw-head > .agw-iconbtn:nth-of-type(3) { display: none; }
+  .agw-badge, .agw-head-sep, .agw-studio-toggle { display: none; }
   .agw-focus-toggle { padding: 5px 7px; }
   .agw-focus-toggle span { display: none; }
   .agw-main { padding: 4px; gap: 4px; }
@@ -936,6 +936,11 @@
 }
 
 .agw-save-state { align-self: center; font-size: 11px; white-space: nowrap; }
+.agw-location-note { display: flex; align-items: center; gap: 9px; padding: 7px 12px; border-bottom: 1px solid var(--border); background: var(--accent-weak); font-size: 11px; }
+.agw-location-note > span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.agw-location-note button { flex-shrink: 0; color: var(--accent); font-size: 11px; }
+.mdv-source-target { background: color-mix(in srgb, var(--accent) 12%, transparent); outline: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.mdv-search-mark { background: color-mix(in srgb, var(--warn) 40%, transparent); color: inherit; }
 .agw-save-state.saved { color: var(--success); }
 .agw-save-state.dirty { color: var(--warn); }
 .agw-recovery-note { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--warn) 8%, var(--bg-secondary)); }

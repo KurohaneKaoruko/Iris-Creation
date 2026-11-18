@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Icon, type IconName } from '../../components/Icon'
 import './CommandPalette.css'
 
@@ -22,6 +22,7 @@ export function CommandPalette({ commands, onClose }: Props) {
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const id = useId()
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -30,9 +31,12 @@ export function CommandPalette({ commands, onClose }: Props) {
       `${c.label} ${c.keywords ?? ''} ${c.hint ?? ''}`.toLowerCase().includes(q),
     )
   }, [commands, query])
+  const selectedIndex = Math.max(0, Math.min(active, filtered.length - 1))
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const previous = document.activeElement as HTMLElement | null
     inputRef.current?.focus()
+    return () => { if (previous?.isConnected) previous.focus() }
   }, [])
 
   useEffect(() => {
@@ -41,9 +45,9 @@ export function CommandPalette({ commands, onClose }: Props) {
 
   useEffect(() => {
     // 键盘选择跟随滚动
-    const el = listRef.current?.querySelector(`[data-idx="${active}"]`)
-    el?.scrollIntoView({ block: 'nearest' })
-  }, [active])
+    const el = listRef.current?.querySelector(`[data-idx="${selectedIndex}"]`)
+    el?.scrollIntoView?.({ block: 'nearest' })
+  }, [selectedIndex])
 
   const pick = (i: number) => {
     const cmd = filtered[i]
@@ -53,30 +57,39 @@ export function CommandPalette({ commands, onClose }: Props) {
   }
 
   return (
-    <div className="cmdk-overlay" onClick={onClose}>
-      <div className="cmdk glass-panel" onClick={(e) => e.stopPropagation()}>
+    <div className="cmdk-overlay" onClick={onClose} onKeyDown={(event) => {
+      if (event.nativeEvent.isComposing) return
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() }
+      if (event.key === 'Tab') { event.preventDefault(); inputRef.current?.focus() }
+    }}>
+      <div className="cmdk glass-panel" role="dialog" aria-modal="true" aria-label="命令面板" onClick={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}
           className="cmdk-input"
+          role="combobox"
+          aria-label="搜索命令"
+          aria-expanded="true"
+          aria-autocomplete="list"
+          aria-controls={`${id}-list`}
+          aria-activedescendant={filtered[selectedIndex] ? `${id}-option-${selectedIndex}` : undefined}
           value={query}
           placeholder="输入命令或搜索…"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return
             if (e.key === 'ArrowDown') {
               e.preventDefault()
-              setActive((a) => Math.min(a + 1, filtered.length - 1))
+              setActive(filtered.length ? (selectedIndex + 1) % filtered.length : 0)
             } else if (e.key === 'ArrowUp') {
               e.preventDefault()
-              setActive((a) => Math.max(a - 1, 0))
+              setActive(filtered.length ? (selectedIndex + filtered.length - 1) % filtered.length : 0)
             } else if (e.key === 'Enter') {
               e.preventDefault()
-              pick(active)
-            } else if (e.key === 'Escape') {
-              onClose()
+              pick(selectedIndex)
             }
           }}
         />
-        <div className="cmdk-list" ref={listRef}>
+        <div className="cmdk-list" id={`${id}-list`} role="listbox" aria-label="匹配命令" ref={listRef}>
           {filtered.length === 0 ? (
             <div className="cmdk-empty">无匹配命令</div>
           ) : (
@@ -84,7 +97,11 @@ export function CommandPalette({ commands, onClose }: Props) {
               <button
                 key={c.id}
                 data-idx={i}
-                className={`cmdk-item ${i === active ? 'active' : ''}`}
+                id={`${id}-option-${i}`}
+                role="option"
+                aria-selected={i === selectedIndex}
+                tabIndex={-1}
+                className={`cmdk-item ${i === selectedIndex ? 'active' : ''}`}
                 onMouseEnter={() => setActive(i)}
                 onClick={() => pick(i)}
               >

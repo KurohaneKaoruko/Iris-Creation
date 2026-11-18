@@ -2,17 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FsEntry } from '../../api/backend'
 import { createDir, createFile, listWorkspaceTree, readText, renameEntry, deleteEntry as del, writeText, writeTextIfCurrent, getSkills, getChatSession, saveChatSession, deleteChatSession, getAppSettings, getApiKeyStatus, exportWork, type Skill, type ChatMessagePayload } from '../../api/backend'
 import { listChapters, createChapterFile, loadWritingHistory, recordTodayWords } from '../../api/novel'
-
-/** Blob 触发浏览器下载 */
-function downloadText(filename: string, content: string) {
-  const blob = new Blob([content], { type: 'text/markdown' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
 import { subscribeEvent } from '../../api/rpc'
 import { useProject } from '../../state/ProjectContext'
 import { useChat, type ChatItem } from '../../hooks/useChat'
@@ -20,21 +9,38 @@ import { useTheme } from '../../state/ThemeContext'
 import { Icon } from '../../components/Icon'
 import { SessionSidebar } from './SessionSidebar'
 import { FileTree } from './FileTree'
-import { MarkdownView, extractToc } from './MarkdownView'
+import { FilePreview } from './FilePreview'
 import { CommandPalette, type Command } from './CommandPalette'
+import { QuickOpen } from './QuickOpen'
+import {
+  CHAPTER_METADATA_PATH, collectDocuments, isHiddenWorkspaceEntry, isTextDocument, parseChapterTitles,
+  parseRecentDocuments, recentDocumentsKey, rememberDocument, resolveDocumentReference,
+} from '../../api/documents'
+import { locateSearchMatch, type SearchLocation } from '../../api/search'
 import { sessionToMarkdown } from '../../api/sessionExport'
 import { Markdown } from './Markdown'
 import { StepCard } from './StepCard'
 import { PromptDialog, ConfirmDialog } from '../workspace/Dialogs'
 import { SettingsDialog } from './SettingsDialog'
-import { ToolsDialog } from './ToolsDialog'
+import { ToolsDialog, type ToolsTab } from './ToolsDialog'
 import { StudioDialog } from './StudioDialog'
 import { ChaptersPanel } from './ChaptersPanel'
 import { LorePanel } from './LorePanel'
 import { DiffView } from './DiffView'
 import { findHits, nextHit, type FindHit } from '../../api/editorFind'
+import { revealEditorSelection } from './editorSelection'
 import { editorDraftKey, parseEditorDraft, shouldOfferDraftRecovery, type EditorDraft } from '../../api/editorDraft'
 import './AgentWorkspace.css'
+
+/** Blob 触发浏览器下载 */
+function downloadText(filename: string, content: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/markdown' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
 
 /**
  * 主流 Agent 布局（ChatGPT/Claude/Cline 综合）：
@@ -45,9 +51,20 @@ export function AgentWorkspace() {
   const { theme, toggleTheme } = useTheme()
   const chat = useChat()
   const [tree, setTree] = useState<FsEntry | null>(null)
+  const [indexBusy, setIndexBusy] = useState(true)
+  const indexRun = useRef(0)
+  const [chapterTitles, setChapterTitles] = useState<Map<string, string>>(() => new Map())
+  const [recentPaths, setRecentPaths] = useState<string[]>(() => {
+    try { return parseRecentDocuments(localStorage.getItem(recentDocumentsKey(workRoot ?? ''))) } catch { return [] }
+  })
+  const documents = useMemo(() => collectDocuments(tree), [tree])
+  const [quickOpen, setQuickOpen] = useState<{ query: string } | null>(null)
+  const [fileLocation, setFileLocation] = useState<{ path: string; target: SearchLocation } | null>(null)
+  const [editorJump, setEditorJump] = useState<SearchLocation | null>(null)
   const [fileContent, setFileContent] = useState('')
   const [fileLoading, setFileLoading] = useState(false)
   const [fileLoadError, setFileLoadError] = useState(false)
+  const [fileLoadAttempt, setFileLoadAttempt] = useState(0)
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editDraft, setEditDraft] = useState('')
@@ -71,7 +88,7 @@ export function AgentWorkspace() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
-  const [toolsTab, setToolsTab] = useState<'planner' | 'stats' | 'consistency' | 'lint' | 'import' | 'search' | 'export' | 'backup'>('planner')
+  const [toolsTab, setToolsTab] = useState<ToolsTab>('planner')
   const [studioOpen, setStudioOpen] = useState(false)
   const [studioToolId, setStudioToolId] = useState<string | null>(null)
   /** 编辑器选中文本（选中时显示浮动工坊按钮） */
@@ -87,8 +104,6 @@ export function AgentWorkspace() {
   const [keyMissing, setKeyMissing] = useState(false)
   const savedSigRef = useRef('')
   const sessionIdRef = useRef<string | null>(null)
-  /** 检索面板「点击直达」挂起的跳行请求：文件加载完成后由预览区消费 */
-  const pendingLineRef = useRef<{ path: string; line: number } | null>(null)
   const draftBaselineRef = useRef('')
   const editingRef = useRef(editing)
   const fileContentRef = useRef(fileContent)
@@ -96,6 +111,8 @@ export function AgentWorkspace() {
   editingRef.current = editing
   fileContentRef.current = fileContent
   const hasUnsavedChanges = editing && editDraft !== fileContent
+  const activeLocation = fileLocation?.path === activePath ? fileLocation.target : undefined
+  const canBeginEdit = !fileLoading && !fileLoadError && !recoveryDraft
 
   const guardUnsavedAction = useCallback((description: string, action: () => void) => {
     if (saveInFlight.current) return
@@ -106,16 +123,46 @@ export function AgentWorkspace() {
     action()
   }, [editing, editDraft, fileContent])
 
-  const navigateToPath = useCallback((path: string | null, line?: number) => {
-    guardUnsavedAction('切换文件', () => {
-      if (path && line != null) pendingLineRef.current = { path, line }
-      setActivePath(path)
-      if (path) {
-        setPanelOpen(true)
-        setPanelTab('file')
+  const navigateToPath = useCallback((path: string, location?: SearchLocation) => {
+    if (path === activePath) {
+      setPanelOpen(true)
+      setPanelTab('file')
+      if (fileLoadError) setFileLoadAttempt((value) => value + 1)
+      if (location) {
+        setPreviewMode('content')
+        setFileLocation({ path, target: { ...location } })
+        if (editing && !saveInFlight.current) {
+          setFindOpen(false)
+          setEditorJump({ ...location })
+        }
       }
+      return
+    }
+    guardUnsavedAction('切换文件', () => {
+      setFileLocation(location ? { path, target: location } : null)
+      setEditing(false)
+      setPreviewMode('content')
+      setEditorJump(null)
+      setFileLoading(true)
+      setActivePath(path)
+      setPanelOpen(true)
+      setPanelTab('file')
     })
-  }, [guardUnsavedAction, setActivePath])
+  }, [activePath, editing, fileLoadError, guardUnsavedAction, setActivePath])
+
+  const beginEdit = (location?: SearchLocation) => {
+    draftBaselineRef.current = fileContent
+    setEditDraft(fileContent)
+    setPreviewMode('content')
+    setEditing(true)
+    setEditorJump(location ?? null)
+  }
+
+  const continueEditing = () => {
+    if (saveInFlight.current) return
+    setPendingGuard(null)
+    editorRef.current?.focus()
+  }
 
   useEffect(() => {
     if (!hasUnsavedChanges) return
@@ -132,16 +179,37 @@ export function AgentWorkspace() {
 
   const refreshTree = useCallback(async () => {
     if (!workRoot) return
+    const run = ++indexRun.current
+    setIndexBusy(true)
     try {
-      setTree(await listWorkspaceTree(8))
+      const [nextTree, metadata] = await Promise.all([listWorkspaceTree(8), readText(CHAPTER_METADATA_PATH).catch(() => '')])
+      if (run !== indexRun.current) return
+      setTree(nextTree)
+      setChapterTitles(parseChapterTitles(metadata))
     } catch (e) {
-      setError(`读取目录失败：${e instanceof Error ? e.message : String(e)}`)
+      if (run === indexRun.current) setError(`读取目录失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      if (run === indexRun.current) setIndexBusy(false)
     }
   }, [workRoot, setError])
 
   useEffect(() => {
     void refreshTree()
+    return () => { indexRun.current += 1 }
   }, [refreshTree])
+
+  useEffect(() => {
+    try { localStorage.setItem(recentDocumentsKey(workRoot ?? ''), JSON.stringify(recentPaths)) } catch { /* storage unavailable */ }
+  }, [recentPaths, workRoot])
+
+  useEffect(() => {
+    if (!editorJump || !editing || !editorRef.current) return
+    const element = editorRef.current
+    const hit = locateSearchMatch(element.value, editorJump)
+    element.focus()
+    revealEditorSelection(element, hit)
+    setEditorJump(null)
+  }, [editorJump, editing])
 
   useEffect(() => {
     void getSkills().then(setSkills).catch(() => setSkills([]))
@@ -167,13 +235,18 @@ export function AgentWorkspace() {
   useEffect(() => {
     let timer = 0
     let alive = true
+    let activeChanged = false
     const un = subscribeEvent('fs_changed', (raw) => {
-      const p = (raw ?? {}) as { path?: string }
+      const p = (raw ?? {}) as { path?: string; kind?: string }
+      // 读取正文/目录本身会产生 Access 事件：不应再次触发读取和刷新。
+      if (p.kind === 'access') return
+      if (p.path === activePath) activeChanged = true
       window.clearTimeout(timer)
       timer = window.setTimeout(() => {
         void refreshTree()
-        if (p.path && activePath && p.path === activePath) {
-          const changedPath = p.path
+        if (activePath && activeChanged) {
+          activeChanged = false
+          const changedPath = activePath
           void readText(activePath).then((c) => {
             if (!alive) return
             if (editingRef.current) {
@@ -210,18 +283,20 @@ export function AgentWorkspace() {
     setFileContent('')
     setEditDraft('')
     if (!activePath) {
-      setFileContent('')
+      setFileLoading(false)
       return
     }
     let alive = true
     setFileLoading(true)
-    readText(activePath)
+    const controller = new AbortController()
+    readText(activePath, controller.signal)
       .then((c) => {
         if (!alive) return
         setFileContent(c)
         setEditDraft(c)
         draftBaselineRef.current = c
         setFileLoading(false)
+        setRecentPaths((paths) => rememberDocument(paths, activePath))
         const key = editorDraftKey(workRoot ?? '', activePath)
         let savedDraft: EditorDraft | null = null
         try { savedDraft = parseEditorDraft(localStorage.getItem(key)) } catch { /* storage disabled */ }
@@ -229,26 +304,6 @@ export function AgentWorkspace() {
         else {
           setRecoveryDraft(null)
           if (savedDraft) { try { localStorage.removeItem(key) } catch { /* storage disabled */ } }
-        }
-        // 检索面板「点击直达」：文件就绪后滚动到目标行并短暂高亮
-        const pending = pendingLineRef.current
-        if (pending && pending.path === activePath) {
-          pendingLineRef.current = null
-          window.setTimeout(() => {
-            const el = document.querySelector('.agw-file-body .mdv') ?? document.querySelector('.agw-file-body')
-            if (!el) return
-            const lines = c.replace(/\r\n/g, '\n').split('\n')
-            const target = Math.min(Math.max(pending.line, 1), lines.length)
-            // 估算：取前 target-1 行文本按段落渲染块定位（渲染块无逐行锚点，用行比例滚动兜底）
-            const ratio = (target - 1) / Math.max(1, lines.length)
-            const block = el.querySelectorAll<HTMLElement>('.mdv-p, .mdv-h, .mdv-list, .mdv-quote, .mdv-code')
-            const idx = Math.min(block.length - 1, Math.round(ratio * block.length))
-            if (block.length > 0 && block[idx]) {
-              block[idx].scrollIntoView({ behavior: 'smooth', block: 'center' })
-            } else {
-              el.scrollTop = ratio * el.scrollHeight
-            }
-          }, 80)
         }
       })
       .catch((e) => {
@@ -259,8 +314,9 @@ export function AgentWorkspace() {
       })
     return () => {
       alive = false
+      controller.abort()
     }
-  }, [activePath, workRoot, setError])
+  }, [activePath, fileLoadAttempt, workRoot, setError])
 
   useEffect(() => {
     if (!editing || !activePath) return
@@ -348,24 +404,31 @@ export function AgentWorkspace() {
     [chat],
   )
 
-  // Ctrl+K / Cmd+K 打开命令面板
+  // 独立的文件与命令入口；弹层内 Escape 不穿透退出专注写作。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.isComposing || settingsOpen || toolsOpen || studioOpen || dialog || pendingGuard) return
       if (e.key === 'Escape' && focusMode) {
         setFocusMode(false)
         return
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
+        setQuickOpen(null)
         setPaletteOpen((v) => !v)
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        setPaletteOpen(false)
+        setQuickOpen((value) => value ? null : { query: '' })
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [focusMode])
+  }, [focusMode, settingsOpen, toolsOpen, studioOpen, dialog, pendingGuard])
 
   const paletteCommands = useMemo<Command[]>(() => [
     { id: 'new-session', icon: 'plus', label: '新建会话', hint: 'Ctrl+K 后回车', run: () => guardUnsavedAction('新建会话', newSession) },
+    { id: 'quick-open', icon: 'search', label: '快速打开文件', hint: 'Ctrl+P', keywords: 'file open 文件 章节 标题 path', run: () => setQuickOpen({ query: '' }) },
     { id: 'new-chapter', icon: 'file-plus', label: '新建章节', keywords: 'chapter 写作', run: () => setDialog({ kind: 'new-chapter' }) },
     { id: 'new-file', icon: 'file-plus', label: '新建 Markdown 文件', keywords: 'file create', run: () => setDialog({ kind: 'new-file' }) },
     { id: 'new-dir', icon: 'folder-plus', label: '新建目录', keywords: 'folder mkdir', run: () => setDialog({ kind: 'new-dir' }) },
@@ -410,22 +473,18 @@ export function AgentWorkspace() {
     { id: 'close-work', icon: 'log-out', label: '关闭工程（返回启动页）', keywords: 'close launch', run: () => guardUnsavedAction('关闭作品', closeWork) },
   ], [newSession, panelOpen, sidebarCollapsed, focusMode, theme, toggleTheme, closeWork, setToolsTab, guardUnsavedAction, activePath])
 
-  const mdFiles = useMemo(() => {
-    const out: FsEntry[] = []
-    const walk = (e: FsEntry) => {
-      if (e.kind === 'file' && /\.(md|markdown|txt)$/i.test(e.path)) out.push(e)
-      for (const c of e.children ?? []) walk(c)
-    }
-    if (tree) walk(tree)
-    return out
-  }, [tree])
-
   const jumpToFile = useCallback(
-    (p: string, line?: number) => {
-      const hit = mdFiles.find((f) => f.path === p || f.path.endsWith(`/${p}`) || f.name === p)
-      if (hit) navigateToPath(hit.path, line)
+    (p: string, location?: SearchLocation) => {
+      if (location) { navigateToPath(p, location); return } // 检索已拿到完整路径，不做同名回退。
+      const matches = resolveDocumentReference(documents, p)
+      if (matches.length === 1) { navigateToPath(matches[0].path); return }
+      if (matches.length > 1) { setQuickOpen({ query: p }); return }
+      // Agent 刚写入的完整相对路径可能早于目录刷新；让实际读取决定是否存在，不静默失效。
+      const path = p.trim().replace(/\\/g, '/').replace(/^\.\//, '')
+      if (isTextDocument(path) && path.split('/').every((part) => part && !isHiddenWorkspaceEntry(part) && !part.includes(':'))) navigateToPath(path)
+      else setError('无法定位该文档，请使用快速打开选择文件。')
     },
-    [mdFiles, navigateToPath],
+    [documents, navigateToPath, setError],
   )
 
   const runDialog = useCallback(
@@ -547,13 +606,14 @@ export function AgentWorkspace() {
         <button className="agw-iconbtn" onClick={() => setPaletteOpen(true)} title="命令面板（Ctrl+K）">
           <Icon name="command" size={17} />
         </button>
+        <button className="agw-iconbtn" onClick={() => setQuickOpen({ query: '' })} title="快速打开文件（Ctrl+P）"><Icon name="search" size={16} /></button>
         <button className={`agw-btn agw-focus-toggle ${focusMode ? 'active' : ''}`} onClick={() => {
           if (!activePath && !focusMode) { setPanelOpen(true); setPanelTab('chapters'); return }
           setFocusMode((v) => !v); setPanelOpen(true); setPanelTab('file')
         }} title={activePath ? '隐藏会话与工具栏，专注写作' : '先在章节或文件面板中打开一篇正文'}>
           <Icon name="focus" size={15} /><span>{focusMode ? '退出专注' : '专注写作'}</span>
         </button>
-        <button className="agw-iconbtn" onClick={() => { setStudioToolId(null); setStudioOpen(true) }} title="创作工坊：头脑风暴 / 场景 / 对话 / 润色等 AI 快捷创作">
+        <button className="agw-iconbtn agw-studio-toggle" onClick={() => { setStudioToolId(null); setStudioOpen(true) }} title="创作工坊：头脑风暴 / 场景 / 对话 / 润色等 AI 快捷创作">
           <Icon name="sparkles" size={16} />
         </button>
         <button className="agw-iconbtn" onClick={() => setToolsOpen(true)} title="工具中心：检索 / 统计 / 一致性 / 铁律 / 导入切章 / 任务队列">
@@ -650,13 +710,20 @@ export function AgentWorkspace() {
                           </>
                         ) : (
                           <>
-                            <button className="agw-btn" disabled={fileLoading || fileLoadError} onClick={() => { draftBaselineRef.current = fileContent; setEditDraft(fileContent); setPreviewMode('content'); setEditing(true) }}>编辑</button>
+                            <button className="agw-btn" disabled={!canBeginEdit} onClick={() => beginEdit(activeLocation)}>编辑</button>
                             <button className="agw-btn" onClick={() => window.dispatchEvent(new CustomEvent('agent-attach-file', { detail: activePath }))} title="作为 Agent 上下文">给 Agent</button>
                             <button className="agw-btn" onClick={() => setPreviewMode('history')} title="变更历史与版本恢复">历史</button>
                           </>
                         )}
                       </span>
                     </div>
+                    {activeLocation && !fileLoading && !fileLoadError ? (
+                      <div className="agw-location-note" role="status">
+                        <span title={activeLocation.query}>第 {activeLocation.line} 行{activeLocation.query ? ` · ${activeLocation.query}` : ''}</span>
+                        {canBeginEdit && !editing ? <button onClick={() => beginEdit(activeLocation)}>编辑此处</button> : null}
+                        <button aria-label="清除检索定位" onClick={() => setFileLocation(null)}><Icon name="x" size={12} /></button>
+                      </div>
+                    ) : null}
                     {diskConflict && diskConflict.path === activePath && editing ? (
                       <div className="agw-conflict-note" role="alert">
                         <div><strong>磁盘内容已被其他操作修改</strong><span>为避免静默覆盖，请选择载入新内容或明确覆盖。</span></div>
@@ -680,12 +747,19 @@ export function AgentWorkspace() {
                     {recoveryDraft && !editing ? (
                       <div className="agw-recovery-note" role="status">
                         <div><strong>找到未保存的本地草稿</strong><span>{recoveryDraft.baseContent === fileContent ? '原文件未变化' : '磁盘文件已变化，请确认后恢复'}</span></div>
-                        <button onClick={() => { draftBaselineRef.current = fileContent; setEditDraft(recoveryDraft.draft); setEditing(true); setRecoveryDraft(null) }}>恢复草稿</button>
+                        <button onClick={() => {
+                          draftBaselineRef.current = fileContent
+                          setEditDraft(recoveryDraft.draft)
+                          setPreviewMode('content')
+                          setEditing(true)
+                          setEditorJump(activeLocation ?? null)
+                          setRecoveryDraft(null)
+                        }}>恢复草稿</button>
                         <button className="quiet" onClick={() => { try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch {} setRecoveryDraft(null) }}>丢弃</button>
                       </div>
                     ) : null}
                     <div className="agw-file-body">
-                      {fileLoadError ? <div className="agw-empty" role="alert">读取文件失败，请重新打开文件；未保存的草稿仍保留在本地。</div> : previewMode === 'history' && activePath ? (
+                      {fileLoadError ? <div className="agw-empty" role="alert">读取文件失败，未保存的草稿仍保留在本地。<br /><button className="agw-btn" onClick={() => setFileLoadAttempt((value) => value + 1)}>重新读取</button></div> : previewMode === 'history' && activePath ? (
                         <DiffView
                           path={activePath}
                           currentContent={fileContent}
@@ -713,7 +787,8 @@ export function AgentWorkspace() {
                                   void saveEdit()
                                 } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
                                   e.preventDefault()
-                                  setFindOpen(true)
+                                  if (findOpen) findInputRef.current?.focus()
+                                  else setFindOpen(true)
                                 }
                               }}
                               onMouseUp={captureSelection}
@@ -787,7 +862,7 @@ export function AgentWorkspace() {
                           ) : null}
                         </div>
                       ) : (
-                        <FilePreviewWithToc content={fileContent} />
+                        <FilePreview key={activePath} content={fileContent} location={activeLocation} />
                       )}
                     </div>
                   </>
@@ -817,13 +892,18 @@ export function AgentWorkspace() {
       ) : null}
 
       {pendingGuard ? (
-        <div className="modal-overlay" onClick={() => { if (!saving) setPendingGuard(null) }}>
+        <div className="modal-overlay" onClick={continueEditing} onKeyDown={(event) => {
+          if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
+            event.stopPropagation()
+            continueEditing()
+          }
+        }}>
           <div className="dialog-box glass-panel agw-unsaved-dialog" role="alertdialog" aria-modal="true" aria-labelledby="agw-unsaved-title" onClick={(e) => e.stopPropagation()}>
             <div className="agw-unsaved-icon"><Icon name="save" size={18} /></div>
             <h3 className="dialog-title" id="agw-unsaved-title">还有修改没有保存</h3>
             <p className="dialog-message">先保存当前内容，再{pendingGuard.description}？</p>
             <div className="dialog-actions">
-              <button className="dialog-btn" disabled={saving} autoFocus onClick={() => setPendingGuard(null)}>继续编辑</button>
+              <button className="dialog-btn" disabled={saving} autoFocus onClick={continueEditing}>继续编辑</button>
               <button className="dialog-btn danger" disabled={saving} onClick={() => {
                 const action = pendingGuard.action
                 setPendingGuard(null)
@@ -847,16 +927,17 @@ export function AgentWorkspace() {
 
       {settingsOpen ? <SettingsDialog onClose={() => setSettingsOpen(false)} /> : null}
       {paletteOpen ? <CommandPalette commands={paletteCommands} onClose={() => setPaletteOpen(false)} /> : null}
-      {toolsOpen ? (
-        <ToolsDialog
-          initialTab={toolsTab}
-          onClose={() => setToolsOpen(false)}
-          onOpenFile={(p, line) => {
-            jumpToFile(p, line)
-            setToolsOpen(false)
-          }}
-        />
-      ) : null}
+      {quickOpen ? <QuickOpen files={documents} titles={chapterTitles} recentPaths={recentPaths} activePath={activePath} loading={indexBusy} initialQuery={quickOpen.query} onClose={() => setQuickOpen(null)} onOpen={navigateToPath} /> : null}
+      <ToolsDialog
+        open={toolsOpen}
+        tab={toolsTab}
+        onTabChange={setToolsTab}
+        onClose={() => setToolsOpen(false)}
+        onOpenFile={(path, location) => {
+          setToolsOpen(false)
+          jumpToFile(path, location)
+        }}
+      />
       {studioOpen ? (
         <StudioDialog
           initialToolId={studioToolId ?? undefined}
@@ -908,30 +989,29 @@ type FindBarProps = {
 function EditorFindBar({ text, editorRef, inputRef, onClose }: FindBarProps) {
   const [query, setQuery] = useState('')
   const [caseSensitive, setCaseSensitive] = useState(false)
-  const [idx, setIdx] = useState(0) // 当前命中序号（0-based，供显示；导航仍由光标位置驱动）
+  const [idx, setIdx] = useState<number | null>(null)
+  const lastCriteria = useRef({ query: '', caseSensitive: false })
 
-  const hits = useMemo<FindHit[]>(() => findHits(text, query, caseSensitive), [text, query, caseSensitive])
+  const normalized = useMemo(() => text.replace(/\r\n?/g, '\n'), [text])
+  const hits = useMemo<FindHit[]>(() => findHits(normalized, query, caseSensitive), [normalized, query, caseSensitive])
 
   /** 把命中应用到 textarea：选中并滚动到可视区中央 */
   const applyHit = useCallback(
     (hit: FindHit | null) => {
       const el = editorRef.current
       if (!el || !hit) return
-      el.focus()
-      el.setSelectionRange(hit.start, hit.end)
-      // 按行估算滚动位置：命中行约在 hit.start 之前的新行数
-      const upTo = text.slice(0, hit.start)
-      const line = (upTo.match(/\n/g) ?? []).length
-      const lineHeight = 1.8 * 12.5 * (16 / 12) // css line-height 1.8 × 字号换算 px 的近似
-      el.scrollTop = Math.max(0, line * lineHeight - el.clientHeight / 2)
+      revealEditorSelection(el, hit)
     },
-    [editorRef, text],
+    [editorRef],
   )
 
   const go = useCallback(
     (next: boolean) => {
       const el = editorRef.current
-      const hit = nextHit(hits, el ? el.selectionStart : 0, next)
+      const current = hits.findIndex((hit) => hit.start === el?.selectionStart && hit.end === el.selectionEnd)
+      const hit = current >= 0
+        ? hits[(current + (next ? 1 : hits.length - 1)) % hits.length]
+        : nextHit(hits, el ? el.selectionStart : 0, next)
       if (hit) {
         applyHit(hit)
         setIdx(hits.findIndex((h) => h === hit))
@@ -940,20 +1020,20 @@ function EditorFindBar({ text, editorRef, inputRef, onClose }: FindBarProps) {
     [hits, applyHit, editorRef],
   )
 
-  // 首次输入即定位首个命中；query 变化重置序号
+  // 仅在搜索条件变化时定位首个命中；正文修改只更新计数，不挪动正在输入的光标。
   useEffect(() => {
-    setIdx(0)
-    if (query) {
-      const el = editorRef.current
-      const hit = nextHit(hits, el ? el.selectionStart : 0, true)
-      if (hit) applyHit(hit)
-    }
-  }, [query, caseSensitive]) // eslint-disable-line react-hooks/exhaustive-deps
+    const previous = lastCriteria.current
+    const changed = query !== previous.query || caseSensitive !== previous.caseSensitive
+    lastCriteria.current = { query, caseSensitive }
+    setIdx(changed && hits.length ? 0 : null)
+    if (changed && hits[0]) applyHit(hits[0])
+  }, [query, caseSensitive, hits, applyHit])
 
   return (
     <div
       className="agw-findbar"
       onKeyDown={(e) => {
+        if (e.nativeEvent.isComposing) return
         if (e.key === 'Escape') {
           e.preventDefault()
           e.stopPropagation()
@@ -969,13 +1049,14 @@ function EditorFindBar({ text, editorRef, inputRef, onClose }: FindBarProps) {
       <input
         ref={inputRef}
         className="agw-find-input"
+        aria-label="在正文中查找"
         value={query}
         placeholder="查找…"
         autoFocus
         onChange={(e) => setQuery(e.target.value)}
       />
       <span className={`agw-find-count ${hits.length === 0 && query ? 'none' : ''}`}>
-        {query ? (hits.length > 0 ? `${idx + 1}/${hits.length}` : '无结果') : ''}
+        {query ? (hits.length > 0 ? idx === null ? `${hits.length} 处` : `${idx + 1}/${hits.length}` : '无结果') : ''}
       </span>
       <button className="agw-iconbtn sm" title="上一个（Shift+Enter）" disabled={hits.length === 0} onClick={() => go(false)}>
         <Icon name="chevron-left" size={14} />
@@ -1219,37 +1300,6 @@ function MessageRow({ m, onJumpFile, onRetry, canRetry, onOpenSettings }: { m: C
           </div>
         ) : null}
       </div>
-    </div>
-  )
-}
-
-/** 文件预览：TOC 折叠条 + Markdown 正文（标题带锚点，点击目录平滑跳转） */
-function FilePreviewWithToc({ content }: { content: string }) {
-  const [tocOpen, setTocOpen] = useState(false)
-  const toc = useMemo(() => extractToc(content), [content])
-  if (toc.length < 2) return <MarkdownView content={content} />
-  return (
-    <div className="mdv-with-toc">
-      <button className="mdv-toc-toggle" onClick={() => setTocOpen((v) => !v)}>
-        <span className={`mdv-toc-arrow ${tocOpen ? 'open' : ''}`}><Icon name="chevron-right" size={12} /></span>
-        目录（{toc.length}）
-      </button>
-      {tocOpen ? (
-        <nav className="mdv-toc">
-          {toc.map((t, i) => (
-            <button
-              key={i}
-              className={`mdv-toc-item lvl${t.lvl}`}
-              onClick={() => {
-                document.getElementById(t.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-              }}
-            >
-              {t.text}
-            </button>
-          ))}
-        </nav>
-      ) : null}
-      <MarkdownView content={content} />
     </div>
   )
 }

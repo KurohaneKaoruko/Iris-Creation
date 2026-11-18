@@ -342,6 +342,7 @@ input:focus, textarea:focus, select:focus {
   background: var(--hover);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   color: var(--text-secondary);
+  white-space: pre-wrap;
 }
 
 .mdv-hr {
