@@ -15,15 +15,20 @@ export type FsEntry = {
 
 export type WorkspaceInfo = {
   root: string
+  kind?: ProjectKind
   /** 其他随 set_workspace 返回的字段按需扩展 */
   [k: string]: unknown
 }
+
+export type ProjectKind = 'novel' | 'screenplay'
 
 export type ProjectItem = {
   name: string
   path: string
   description: string | null
   chapters_count: number
+  kind?: ProjectKind
+  scenes_count?: number
   total_words: number
   updated_at: number
   last_opened_at?: number | null
@@ -124,6 +129,8 @@ export const setWorkspace = (path: string) => rpc<WorkspaceInfo>('set_workspace'
 export const getBookshelfState = () => rpc<BookshelfState>('get_bookshelf_state')
 export const createNovelWork = (name: string, description?: string) =>
   rpc<ProjectItem>('create_novel_work', { name, description: description ?? null })
+export const createProject = (name: string, kind: ProjectKind, description?: string) =>
+  rpc<ProjectItem>('create_project', { name, kind, description: description || null })
 export const updateWorkDescription = (path: string, description: string) =>
   rpc<void>('update_work_description', { path, description })
 /** 从书架移除记录（不删盘上文件） */
@@ -148,20 +155,20 @@ export const getLastWorkspace = () => rpc<string | null>('get_last_workspace')
 
 // ---- fs ----
 
-export const listWorkspaceTree = (maxDepth = 6, signal?: AbortSignal) => rpc<FsEntry>('list_workspace_tree', { maxDepth }, signal)
-export const readText = (relativePath: string, signal?: AbortSignal) => rpc<string>('read_text', { relativePath }, signal)
+export const listWorkspaceTree = (maxDepth = 6, signal?: AbortSignal, workspaceRoot?: string) => rpc<FsEntry>('list_workspace_tree', { maxDepth, workspaceRoot }, signal)
+export const readText = (relativePath: string, signal?: AbortSignal, workspaceRoot?: string) => rpc<string>('read_text', { relativePath, workspaceRoot }, signal)
 /** 导出整本：合并 stories/ 全部章节，返回 (文件名, 内容) */
 export const exportWork = (format: 'md' | 'txt' = 'md') =>
   rpc<{ filename: string; content: string }>('export_work', { format })
-export const writeText = (relativePath: string, content: string) =>
-  rpc<void>('write_text', { relativePath, content })
-export const writeTextIfCurrent = (relativePath: string, content: string, expectedCurrent: string) =>
-  rpc<void>('write_text_if_current', { relativePath, content, expectedCurrent })
-export const createFile = (relativePath: string) => rpc<void>('create_file', { relativePath })
-export const createDir = (relativePath: string) => rpc<void>('create_dir', { relativePath })
-export const deleteEntry = (relativePath: string) => rpc<void>('delete_entry', { relativePath })
-export const renameEntry = (fromPath: string, toPath: string) =>
-  rpc<void>('rename_entry', { fromRelativePath: fromPath, toRelativePath: toPath })
+export const writeText = (relativePath: string, content: string, workspaceRoot?: string) =>
+  rpc<void>('write_text', { relativePath, content, workspaceRoot })
+export const writeTextIfCurrent = (relativePath: string, content: string, expectedCurrent: string, workspaceRoot?: string) =>
+  rpc<void>('write_text_if_current', { relativePath, content, expectedCurrent, workspaceRoot })
+export const createFile = (relativePath: string, workspaceRoot?: string) => rpc<void>('create_file', { relativePath, workspaceRoot })
+export const createDir = (relativePath: string, workspaceRoot?: string) => rpc<void>('create_dir', { relativePath, workspaceRoot })
+export const deleteEntry = (relativePath: string, workspaceRoot?: string) => rpc<void>('delete_entry', { relativePath, workspaceRoot })
+export const renameEntry = (fromPath: string, toPath: string, workspaceRoot?: string) =>
+  rpc<void>('rename_entry', { fromRelativePath: fromPath, toRelativePath: toPath, workspaceRoot })
 
 // ---- settings / skills ----
 
@@ -202,6 +209,7 @@ export const chatGenerateStream = (args: {
   messages: ChatMessagePayload[]
   assistantId?: string | null
   providerId?: string | null
+  workspaceRoot?: string
 }) =>
   rpc<void>('chat_generate_stream', {
     streamId: args.streamId,
@@ -209,6 +217,7 @@ export const chatGenerateStream = (args: {
     useMarkdown: true,
     agentId: args.assistantId ?? null,
     providerId: args.providerId ?? null,
+    workspaceRoot: args.workspaceRoot,
   })
 
 export const chatCancelStream = (streamId: string) => rpc<void>('chat_cancel_stream', { streamId })
@@ -238,11 +247,13 @@ export type HistoryEntry = {
   summary: string
 }
 
-export const listHistoryEntries = (max = 120) => rpc<HistoryEntry[]>('list_history_entries', { max })
+export const listHistoryEntries = (max = 120, workspaceRoot?: string, relativePath?: string) =>
+  rpc<HistoryEntry[]>('list_history_entries', { max, workspaceRoot, relativePath })
 export const createHistorySnapshot = (relativePath: string, label?: string) =>
   rpc<HistoryEntry>('create_history_snapshot', { relativePath: relativePath, label: label ?? null })
-export const readHistorySnapshot = (id: string) => rpc<string>('read_history_snapshot', { id })
-export const restoreHistorySnapshot = (id: string) => rpc<void>('restore_history_snapshot', { id })
+export const readHistorySnapshot = (id: string, workspaceRoot?: string) => rpc<string>('read_history_snapshot', { id, workspaceRoot })
+export const restoreHistorySnapshot = (id: string, workspaceRoot?: string, expectedCurrent?: string) =>
+  rpc<string>('restore_history_snapshot', { id, workspaceRoot, expectedCurrent })
 
 // ---- book analysis（拆书）----
 

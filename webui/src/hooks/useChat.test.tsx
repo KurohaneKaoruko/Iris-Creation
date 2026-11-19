@@ -6,35 +6,33 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createElement, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react' // React 18: act 从 react 导出（react-dom/test-utils 已弃用路径在 18.3 仍可用，但 react 直接导出最稳）
+import { chatCancelStream, chatGenerateStream } from '../api/backend'
 import { useChat } from './useChat'
 
 type HookApi = ReturnType<typeof useChat>
 
 // ---- mock rpc / backend ----
-type Handler = (payload: unknown) => void
-const handlers = new Map<string, Handler[]>()
-let mockGenResult: Promise<unknown> = Promise.resolve()
+type Handler = (event: string, payload: unknown) => void
+let streamHandler: Handler | undefined
+let disconnected: (() => void) | undefined
+let mockWait: Promise<void>
+let mockGenResult: () => Promise<void>
 
 vi.mock('../api/rpc', () => ({
-  subscribeEvent: vi.fn((event: string, handler: Handler) => {
-    const list = handlers.get(event) ?? []
-    list.push(handler)
-    handlers.set(event, list)
-    return () => {
-      const l = handlers.get(event) ?? []
-      handlers.set(event, l.filter((h) => h !== handler))
-    }
+  subscribeStreamEvents: vi.fn((handler: Handler, onDisconnect: () => void) => {
+    streamHandler = handler
+    disconnected = onDisconnect
+    return { waitReady: () => mockWait, unlisten: () => { streamHandler = undefined; disconnected = undefined } }
   }),
-  wsSend: vi.fn(() => true),
 }))
 
 vi.mock('../api/backend', () => ({
-  chatGenerateStream: vi.fn(() => mockGenResult),
+  chatGenerateStream: vi.fn(() => mockGenResult()),
   chatCancelStream: vi.fn(() => Promise.resolve()),
 }))
 
 function emit(event: string, payload: unknown) {
-  for (const h of handlers.get(event) ?? []) h(payload)
+  streamHandler?.(event, payload)
 }
 
 /** 极简 hook 挂载壳 */
@@ -60,8 +58,10 @@ function mountHook(use: () => HookApi): { api: HookApi; unmount: () => void } {
 }
 
 beforeEach(() => {
-  handlers.clear()
-  mockGenResult = Promise.resolve()
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  vi.clearAllMocks()
+  mockWait = Promise.resolve()
+  mockGenResult = () => Promise.resolve()
 })
 
 afterEach(() => {
@@ -72,7 +72,7 @@ afterEach(() => {
 describe('useChat 事件协议', () => {
   it('token 累积 + done 收尾，content 干净落地', async () => {
     const h = mountHook(useChat)
-    expect(handlers.get('ai_stream_token')?.length).toBeGreaterThan(0)
+    expect(streamHandler).toBeTypeOf('function')
 
     await act(async () => {
       await h.api.send('你好', {})
@@ -118,7 +118,7 @@ describe('useChat 事件协议', () => {
   })
 
   it('RPC reject 也会终止流', async () => {
-    mockGenResult = Promise.reject(new Error('network down'))
+    mockGenResult = () => Promise.reject(new Error('network down'))
     const h = mountHook(useChat)
     await act(async () => {
       await h.api.send('hi', {})
@@ -150,6 +150,38 @@ describe('useChat 事件协议', () => {
     })
     expect(h.api.messages.length).toBe(0)
     expect(h.api.busy).toBe(false)
+    h.unmount()
+  })
+
+  it('stopping before the handshake prevents the request entirely', async () => {
+    let ready!: () => void
+    mockWait = new Promise((resolve) => { ready = resolve })
+    const h = mountHook(useChat)
+    await act(async () => h.api.send('先停下'))
+    expect(chatGenerateStream).not.toHaveBeenCalled()
+    act(() => h.api.cancel())
+    await act(async () => ready())
+    expect(h.api.messages.at(-1)?.stopped).toBe(true)
+    expect(chatGenerateStream).not.toHaveBeenCalled()
+    h.unmount()
+  })
+
+  it('a disconnect ends a partial run and cancels only after the launch RPC settles', async () => {
+    let acknowledge!: () => void
+    mockGenResult = () => new Promise((resolve) => { acknowledge = resolve })
+    const h = mountHook(() => useChat('/screenplay'))
+    await act(async () => h.api.send('场次一'))
+    const id = h.api.messages.at(-1)?.streamId
+    expect(chatGenerateStream).toHaveBeenCalledWith(expect.objectContaining({ workspaceRoot: '/screenplay' }))
+    act(() => emit('ai_stream_token', { streamId: id, token: '半截回复' }))
+    act(() => disconnected?.())
+    expect(h.api.busy).toBe(false)
+    expect(h.api.messages.at(-1)).toMatchObject({ content: '半截回复', failed: expect.stringContaining('断开') })
+    expect(chatCancelStream).not.toHaveBeenCalled()
+    await act(async () => acknowledge())
+    expect(chatCancelStream).toHaveBeenCalledWith(id)
+    act(() => emit('ai_stream_done', { streamId: id }))
+    expect(h.api.messages.at(-1)?.failed).toContain('断开')
     h.unmount()
   })
 

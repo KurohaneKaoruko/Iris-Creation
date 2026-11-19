@@ -343,7 +343,7 @@ pub fn chat_generate_stream(
   let sink = crate::event_sink::shared(crate::event_sink::TauriEventSink::new(app));
   crate::services::ai_stream::chat_generate_stream_service(
     sink,
-    &state,
+    crate::services::workspace::get_workspace_root(&state)?,
     stream_id,
     messages,
     use_markdown,

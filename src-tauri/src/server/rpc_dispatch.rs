@@ -67,6 +67,7 @@ fn first_key(args: &Value, keys: &[&str]) -> String {
 
 pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result<Value, String> {
   let state = state_of(ctx);
+  let workspace = arg_opt_str(&args, &["workspaceRoot", "workspace_root"]);
   match command {
     "ping" => Ok(json!("pong")),
 
@@ -93,6 +94,13 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
       let desc = arg_opt_str(&args, &["description"]);
       let v = crate::services::bookshelf::create_novel_project(&name, desc)?;
       serde_json::to_value(v).map_err(|e| e.to_string())
+    }
+    "create_project" => {
+      let name = arg_str(&args, &["name"])?;
+      let description = arg_opt_str(&args, &["description"]);
+      let kind = arg_t(&args, "kind")?;
+      let project = crate::services::bookshelf::create_project(&name, description, kind)?;
+      serde_json::to_value(project).map_err(|e| e.to_string())
     }
     "update_work_description" => {
       let path = arg_str(&args, &["path"])?;
@@ -130,6 +138,23 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
       Ok(json!(null))
     }
 
+    // ---- screenplay: mutations and reads are bound to the project that opened the UI ----
+    "list_screenplay_scenes" | "create_screenplay_scene" | "reorder_screenplay_scenes" | "save_screenplay_export" => {
+      use crate::services::{screenplay, workspace::scoped_workspace};
+      let expected = workspace.as_deref().ok_or("missing argument: workspaceRoot")?;
+      let root = scoped_workspace(state, Some(expected))?;
+      match command {
+        "list_screenplay_scenes" => serde_json::to_value(screenplay::list(&root)?).map_err(|e| e.to_string()),
+        "create_screenplay_scene" => serde_json::to_value(screenplay::create(&root, arg_t(&args, "draft")?)?).map_err(|e| e.to_string()),
+        "reorder_screenplay_scenes" => {
+          let expected: Vec<String> = arg_t(&args, "expectedPaths")?;
+          screenplay::reorder(&root, &expected, arg_t(&args, "paths")?)?;
+          Ok(json!(null))
+        }
+        _ => screenplay::save_export(&root, &arg_str(&args, &["format"])?).map(|path| json!(path)),
+      }
+    }
+
     // ---- 目录浏览（打开目录对话框） ----
     "browse_dir" => {
       let path = arg_opt_str(&args, &["path"]).unwrap_or_default();
@@ -144,12 +169,12 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
     // ---- fs ----
     "list_workspace_tree" => {
       let depth = arg_usize(&args, &["max_depth", "maxDepth"])?;
-      let v = crate::services::fs::list_workspace_tree(state, depth)?;
+      let v = crate::services::fs::list_workspace_tree_scoped(state, depth, workspace.as_deref())?;
       serde_json::to_value(v).map_err(|e| e.to_string())
     }
     "read_text" => {
       let path = arg_str(&args, &["relative_path", "relativePath", "path"])?;
-      crate::services::fs::read_text(state, &path).map(|v| json!(v))
+      crate::services::fs::read_text_scoped(state, &path, workspace.as_deref()).map(|v| json!(v))
     }
     "export_work" => {
       let format = args
@@ -163,30 +188,30 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
     "write_text" => {
       let path = arg_str(&args, &["relative_path", "relativePath", "path"])?;
       let content = arg_str(&args, &["content"])?;
-      crate::services::fs::write_text(state, &path, &content).map(|_| json!(null))
+      crate::services::fs::write_text_scoped(state, &path, &content, None, workspace.as_deref()).map(|_| json!(null))
     }
     "write_text_if_current" => {
       let path = arg_str(&args, &["relative_path", "relativePath", "path"])?;
       let content = arg_str(&args, &["content"])?;
       let expected = arg_str(&args, &["expected_current", "expectedCurrent"])?;
-      crate::services::fs::write_text_with_baseline(state, &path, &content, Some(&expected)).map(|_| json!(null))
+      crate::services::fs::write_text_scoped(state, &path, &content, Some(&expected), workspace.as_deref()).map(|_| json!(null))
     }
     "create_file" => {
       let path = arg_str(&args, &["relative_path", "relativePath", "path"])?;
-      crate::services::fs::create_file(state, &path).map(|_| json!(null))
+      crate::services::fs::create_file_scoped(state, &path, workspace.as_deref()).map(|_| json!(null))
     }
     "create_dir" => {
       let path = arg_str(&args, &["relative_path", "relativePath", "path"])?;
-      crate::services::fs::create_dir(state, &path).map(|_| json!(null))
+      crate::services::fs::create_dir_scoped(state, &path, workspace.as_deref()).map(|_| json!(null))
     }
     "delete_entry" => {
       let path = arg_str(&args, &["relative_path", "relativePath", "path"])?;
-      crate::services::fs::delete_entry(state, &path).map(|_| json!(null))
+      crate::services::fs::delete_entry_scoped(state, &path, workspace.as_deref()).map(|_| json!(null))
     }
     "rename_entry" => {
       let from = arg_str(&args, &["from_relative_path", "fromRelativePath", "from"])?;
       let to = arg_str(&args, &["to_relative_path", "toRelativePath", "to"])?;
-      crate::services::fs::rename_entry(state, &from, &to).map(|_| json!(null))
+      crate::services::fs::rename_entry_scoped(state, &from, &to, workspace.as_deref()).map(|_| json!(null))
     }
     "parse_composer_directive" => {
       let input = arg_str(&args, &["input"])?;
@@ -273,8 +298,9 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
     // ---- history ----
     "list_history_entries" => {
       let max = arg_opt_usize(&args, &["max"]);
-      let root = crate::services::workspace::get_workspace_root(state)?;
-      let v = crate::services::workspace::list_history_entries(&root, max)?;
+      let root = crate::services::workspace::scoped_workspace(state, workspace.as_deref())?;
+      let file = arg_opt_str(&args, &["relative_path", "relativePath"]);
+      let v = crate::services::workspace::list_file_history(&root, max, file.as_deref())?;
       serde_json::to_value(v).map_err(|e| e.to_string())
     }
     "create_history_snapshot" => {
@@ -286,13 +312,14 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
     }
     "read_history_snapshot" => {
       let id = arg_str(&args, &["id"])?;
-      let root = crate::services::workspace::get_workspace_root(state)?;
+      let root = crate::services::workspace::scoped_workspace(state, workspace.as_deref())?;
       crate::services::workspace::read_history_snapshot(&root, &id).map(|v| json!(v))
     }
     "restore_history_snapshot" => {
       let id = arg_str(&args, &["id"])?;
-      let root = crate::services::workspace::get_workspace_root(state)?;
-      crate::services::workspace::restore_history_snapshot(&root, &id).map(|v| json!(v))
+      let expected = arg_opt_str(&args, &["expected_current", "expectedCurrent"]);
+      let root = crate::services::workspace::scoped_workspace(state, workspace.as_deref())?;
+      crate::services::workspace::restore_history_snapshot_if_current(&root, &id, expected.as_deref()).map(|v| json!(v))
     }
 
     // ---- chat ----
@@ -353,7 +380,7 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
       let provider_id = arg_opt_str(&args, &["providerId", "provider_id"]);
       crate::services::ai_stream::chat_generate_stream_service(
         ctx.event_sink.clone(),
-        state,
+        crate::services::workspace::scoped_workspace(state, workspace.as_deref())?,
         stream_id,
         messages,
         use_markdown,

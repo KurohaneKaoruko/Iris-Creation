@@ -12,14 +12,16 @@ type Props = {
   recentPaths: string[]
   activePath: string | null
   loading: boolean
+  screenplay?: boolean
   initialQuery?: string
   onOpen: (path: string) => void
   onClose: () => void
 }
 
 /** 文件名、章节标题与路径的统一入口；不读取正文，不抢占 Ctrl/Cmd+K 命令面板。 */
-export function QuickOpen({ files, titles, recentPaths, activePath, loading, initialQuery = '', onOpen, onClose }: Props) {
+export function QuickOpen({ files, titles, recentPaths, activePath, loading, screenplay = false, initialQuery = '', onOpen, onClose }: Props) {
   const [query, setQuery] = useState(initialQuery)
+  const description = `文件名、${screenplay ? '场次' : '章节'}标题或路径`
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
@@ -64,13 +66,13 @@ export function QuickOpen({ files, titles, recentPaths, activePath, loading, ini
             ref={inputRef}
             className="cmdk-input"
             role="combobox"
-            aria-label="文件名、章节标题或路径"
+             aria-label={description}
             aria-autocomplete="list"
             aria-expanded="true"
             aria-controls={`${id}-list`}
             aria-activedescendant={selected ? `${id}-option-${index}` : undefined}
             value={query}
-            placeholder="搜索文件名、章节标题或路径…"
+             placeholder={`搜索${description}…`}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing) return
@@ -86,7 +88,7 @@ export function QuickOpen({ files, titles, recentPaths, activePath, loading, ini
           <button ref={closeRef} className="agw-iconbtn" onClick={onClose} aria-label="关闭快速打开"><Icon name="x" size={16} /></button>
         </div>
         <div className="cmdk-list" id={`${id}-list`} role="listbox" aria-label="匹配文件" ref={listRef} aria-busy={loading}>
-          {visible.length === 0 ? <div className="cmdk-empty">{loading ? '正在更新文件索引…' : query.trim() ? '没有匹配文件，试试部分标题或目录名。' : '尚无可打开的文档，请先新建章节或导入作品。'}</div> : visible.map((file, position) => (
+          {visible.length === 0 ? <div className="cmdk-empty">{loading ? '正在更新文件索引…' : query.trim() ? '没有匹配文件，试试部分标题或目录名。' : '尚无可打开的文档，请先新建作品内容。'}</div> : visible.map((file, position) => (
             <button
               key={file.path}
               id={`${id}-option-${position}`}

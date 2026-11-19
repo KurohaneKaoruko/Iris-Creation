@@ -376,7 +376,7 @@ export const STUDIO_STYLES = [
 
 // ---- 流式执行 ----
 
-type StreamPayload = { streamId?: string; stream_id?: string; token?: string; cancelled?: boolean }
+type StreamPayload = { streamId?: string; stream_id?: string; token?: string; cancelled?: boolean; message?: string }
 
 function streamIdOf(p: StreamPayload): string | null {
   return typeof p.streamId === 'string' ? p.streamId : typeof p.stream_id === 'string' ? p.stream_id : null
@@ -464,31 +464,43 @@ export function streamStudio(args: {
 }): StudioHandle {
   const streamId = `studio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   let output = ''
-  let cancelled = false
+  let request: Promise<void> | undefined
+  let cancel = () => {}
   let sub: { unlisten: Unlisten } | null = null
 
   const promise = new Promise<string>((resolve, reject) => {
     let settled = false
+    let deadline: number | undefined
     const finish = (fn: () => void) => {
-      if (settled) return
+      if (settled) return false
       settled = true
+      if (deadline !== undefined) window.clearTimeout(deadline)
       sub?.unlisten()
       fn()
+      return true
     }
+    const fail = (error: unknown, abortRemote = false) => {
+      const ended = finish(() => reject(error instanceof Error ? error : new Error(String(error))))
+      // When stop wins the race with startup, don't send cancel before the server registers the ID.
+      if (abortRemote && ended && request) void request.then(() => chatCancelStream(streamId)).catch(() => {})
+    }
+    cancel = () => fail(new DOMException('生成已停止', 'AbortError'), true)
 
     // 共享 WS 事件连接：所有流复用一条连接，按 streamId 过滤。
     // 连接就绪后才发 RPC——保证 token/done 不会在订阅生效前广播出去。
     const tokenSub = subscribeStreamEvents((event, raw) => {
       const p = (raw ?? {}) as StreamPayload
-      if (streamIdOf(p) !== streamId) return
+      if (settled || streamIdOf(p) !== streamId) return
       if (event === 'ai_stream_token') {
         const token = typeof p.token === 'string' ? p.token : ''
         if (!token) return
         output += token
         args.onToken?.(output)
+      } else if (event === 'ai_error') {
+        fail(new Error(p.message || '生成失败，请检查模型或网络配置。'))
       } else if (event === 'ai_stream_done') {
-        if (cancelled || p.cancelled === true) {
-          finish(() => resolve(output))
+        if (p.cancelled === true) {
+          fail(new DOMException('生成已停止', 'AbortError'))
           return
         }
         if (!output.trim()) {
@@ -497,29 +509,25 @@ export function streamStudio(args: {
         }
         finish(() => resolve(output))
       }
-    })
+    }, () => fail(new Error('流式连接已断开，当前结果可能不完整。'), true))
     sub = tokenSub
 
     const messages: ChatMessagePayload[] = [{ role: 'user', content: args.user }]
-    const start = () =>
-      studioCompleteStream({
+    void tokenSub.waitReady().then(() => {
+      if (settled) return
+      deadline = window.setTimeout(() => fail(new Error('生成超时，未收到完整结果。'), true), 330000)
+      request = studioCompleteStream({
         streamId,
         system: args.system,
         messages,
         temperature: null,
         providerId: args.providerId ?? null,
-      }).catch((e) => finish(() => reject(e instanceof Error ? e : new Error(String(e)))))
-
-    void tokenSub.waitReady().then(start)
+      })
+      return request
+    }).catch((e) => fail(e))
   })
 
-  return {
-    promise,
-    cancel: () => {
-      cancelled = true
-      void chatCancelStream(streamId).catch(() => {})
-    },
-  }
+  return { promise, cancel: () => cancel() }
 }
 
 /** 工具结果落盘为 Markdown 文件（无打开工程时报错由调用方处理）。 */

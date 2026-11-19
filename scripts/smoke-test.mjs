@@ -15,15 +15,33 @@ const sandbox = await mkdtemp(join(tmpdir(), 'iris-acceptance-'))
 const passed = []
 let child, ws, base, output = '', mode = 'success'
 const events = []
+let agentCalls = 0
+const sse = (content) => `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`
 const provider = createServer(async (req, res) => {
-  for await (const _chunk of req) { /* consume request without logging credentials */ }
+  let body = ''
+  for await (const chunk of req) body += chunk
   if (mode === 'unauthorized') { res.writeHead(401); res.end('{"error":{"message":"smoke unauthorized"}}'); return }
+  if (mode === 'rate-limit') { res.writeHead(429); res.end('{"error":{"message":"smoke rate limit"}}'); return }
   if (mode === 'malformed') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{broken'); return }
   if (mode === 'disconnect') { req.socket.destroy(); return }
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
-  res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '验收正文：' } }] })}\n\n`)
+  if (mode === 'script-agent') {
+    const data = JSON.parse(body)
+    if (!data.messages[0]?.content.includes('剧本创作助手')) { res.end('data: {"error":"wrong project prompt"}\n\n'); return }
+    const replies = ['ACTION: screenplay_list_scenes\nINPUT: {}', 'ACTION: fs_read_text\nINPUT: {"path":"outline/outline.md"}', 'FINAL: 可先用车站广播交代时间，不改写原稿。']
+    const reply = replies[agentCalls++]
+    res.end(sse(reply) + 'data: [DONE]\n\n')
+    return
+  }
+  const first = Buffer.from(sse('验收正文：'))
+  const splitAt = first.indexOf(Buffer.from('验')) + 1
+  res.write(first.subarray(0, splitAt))
+  await delay(20) // force an SSE line and a CJK character to cross network chunks
+  res.write(first.subarray(splitAt))
   if (mode === 'hold') return
-  res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '雨停以后，故事继续。🌧️' } }] })}\n\n`)
+  if (mode === 'partial') { res.end(); return }
+  if (mode === 'in-band-error') { res.end('data: {"error":{"message":"model aborted"}}\n\n'); return }
+  res.write(sse('雨停以后，故事继续。🌧️'))
   res.end('data: [DONE]\n\n')
 })
 
@@ -129,25 +147,75 @@ try {
   await waitFor(() => events.some((event) => event.event === 'ai_stream_token' && event.payload.streamId === 'cancel'), 'first token before cancellation')
   await rpc('chat_cancel_stream', { streamId: 'cancel' })
   await waitFor(() => events.some((event) => event.event === 'ai_stream_done' && event.payload.streamId === 'cancel' && event.payload.cancelled), 'cancelled event')
-  for (const failure of ['unauthorized', 'malformed', 'disconnect']) {
+  for (const failure of ['unauthorized', 'rate-limit', 'malformed', 'disconnect', 'partial', 'in-band-error']) {
     mode = failure
     const event = await stream(failure, 'error')
     assert.ok(event.payload.message)
     assert.equal(await rpc('read_text', { path }), original)
   }
-  passed.push('local fake-provider streaming, cancellation, missing-key/401/malformed/disconnect failures; source remains intact')
+  passed.push('fake Provider: split UTF-8, streaming, cancellation, missing key, 401/429, malformed response, disconnect and premature EOF; source remains intact')
+
+  const script = await rpc('create_project', { name: '验收作品', description: '验收剧本', kind: 'screenplay' })
+  assert.notEqual(script.path, work.path)
+  assert.equal(script.kind, 'screenplay')
+  assert.equal(script.scenes_count, 1)
+  assert.equal(script.chapters_count, 0)
+  const workspaceRoot = script.path
+  assert.equal((await rpc('set_workspace', { path: workspaceRoot })).kind, 'screenplay')
+  const scripted = await rpc('create_screenplay_scene', { workspaceRoot, draft: { title: '最后一班车', interior: 'exterior', location: '老车站', time: '夜', body: '**小秋：** 车还没来。' } })
+  assert.equal(scripted.setting, '外景 · 老车站 · 夜')
+  const paths = (await rpc('list_screenplay_scenes', { workspaceRoot })).map((scene) => scene.path)
+  const reversed = [...paths].reverse()
+  await rpc('reorder_screenplay_scenes', { workspaceRoot, expectedPaths: paths, paths: reversed })
+  await assert.rejects(rpc('reorder_screenplay_scenes', { workspaceRoot, expectedPaths: paths, paths: reversed }), /场次列表已变化/)
+
+  await assert.rejects(rpc('write_text_if_current', { workspaceRoot: work.path, path: scripted.path, content: 'wrong work', expectedCurrent: '' }), /作品已切换/)
+  await assert.rejects(rpc('create_screenplay_scene', { workspaceRoot: work.path, draft: { title: 'wrong work' } }), /作品已切换/)
+  await assert.rejects(rpc('init_novel'), /不能初始化为小说/)
+  await assert.rejects(rpc('create_file', { workspaceRoot, path: scripted.path }), /exists|file.*failed/i)
+  await assert.rejects(rpc('delete_entry', { workspaceRoot, path: scripted.path }), /不直接删除场次/)
+
+  const sceneOriginal = await rpc('read_text', { workspaceRoot, path: scripted.path })
+  const sceneEdited = `${sceneOriginal}\n广播里响起末班车的提示。\n`
+  await rpc('write_text_if_current', { workspaceRoot, path: scripted.path, content: sceneEdited, expectedCurrent: sceneOriginal })
+  const sceneSnapshot = (await rpc('list_history_entries', { workspaceRoot })).find((entry) => entry.file_path === scripted.path)
+  assert.equal(await rpc('read_history_snapshot', { workspaceRoot, id: sceneSnapshot.id }), sceneOriginal)
+  await assert.rejects(rpc('restore_history_snapshot', { workspaceRoot, id: sceneSnapshot.id, expectedCurrent: sceneOriginal }), /changed on disk/)
+  assert.equal(await rpc('read_text', { workspaceRoot, path: scripted.path }), sceneEdited)
+  await rpc('restore_history_snapshot', { workspaceRoot, id: sceneSnapshot.id, expectedCurrent: sceneEdited })
+  const markdown = await rpc('save_screenplay_export', { workspaceRoot, format: 'md' })
+  const plain = await rpc('save_screenplay_export', { workspaceRoot, format: 'txt' })
+  assert.match(await readFile(join(workspaceRoot, markdown), 'utf8'), /## 第 1 场 · 最后一班车[\s\S]*## 第 2 场 · 开场/)
+  assert.match(await readFile(join(workspaceRoot, plain), 'utf8'), /小秋： 车还没来。/)
+  assert.equal(await readFile(join(workspaceRoot, scripted.path), 'utf8'), sceneOriginal)
+  passed.push('screenplay: typed shelf, stable scene paths, stale reorder/write/restore rejection, history, ordered Markdown and TXT export')
+
+  mode = 'script-agent'
+  await rpc('chat_generate_stream', { streamId: 'script-agent', workspaceRoot, providerId: 'smoke-local', messages: [{ role: 'user', content: '读场次和分场大纲，再给开场建议。' }] })
+  await waitFor(() => events.some((event) => event.event === 'ai_stream_done' && event.payload.streamId === 'script-agent'), 'screenplay Agent completion')
+  const scriptEvents = events.filter((event) => event.payload.streamId === 'script-agent')
+  const steps = scriptEvents.filter((event) => event.event === 'ai_agent_step' && event.payload.phase === 'finish')
+  assert.deepEqual(steps.map(({ payload }) => [payload.tool, payload.ok]), [['screenplay_list_scenes', true], ['fs_read_text', true]])
+  assert.match(scriptEvents.filter((event) => event.event === 'ai_stream_token').map((event) => event.payload.token).join(''), /^可先用车站广播/)
+  assert.equal(await rpc('read_text', { workspaceRoot, path: scripted.path }), sceneOriginal)
+  passed.push('screenplay Agent reads scenes and outline with its own prompts, while preserving source')
 
   await stop()
   const restored = join(sandbox, 'restored-work')
+  const restoredScript = join(sandbox, 'restored-screenplay')
   await cp(work.path, restored, { recursive: true })
+  await cp(script.path, restoredScript, { recursive: true })
   assert.equal(await readFile(join(restored, path), 'utf8'), original)
   await start()
   assert.equal((await rpc('get_app_settings')).active_provider_id, 'smoke-local')
   assert.equal((await rpc('get_chat_session', { id: 'smoke-session' })).messages[1].content, generated)
-  await rpc('set_workspace', { path: restored })
+  assert.equal((await rpc('set_workspace', { path: restored })).kind, 'novel')
   assert.equal(await rpc('read_text', { path }), original)
   assert.ok((await rpc('list_history_entries')).length > 0)
-  passed.push('forced process termination and restart retain settings/session; external directory copy reopens with chapter/history')
+  assert.equal((await rpc('set_workspace', { path: restoredScript })).kind, 'screenplay')
+  assert.deepEqual((await rpc('list_screenplay_scenes', { workspaceRoot: restoredScript })).map((scene) => scene.path), reversed)
+  assert.equal(await rpc('read_history_snapshot', { workspaceRoot: restoredScript, id: sceneSnapshot.id }), sceneOriginal)
+  passed.push('forced restart preserves settings/session; copying whole novel and screenplay directories restores manuscript, order and history')
   console.log(JSON.stringify({ passed, notCovered: ['real paid model/network', 'desktop installer UI and OS upgrade', 'long-duration writing and disk-failure recovery'], result: 'pass' }, null, 2))
 } catch (error) {
   console.error(error.stack)

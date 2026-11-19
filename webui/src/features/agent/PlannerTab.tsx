@@ -295,6 +295,7 @@ export function PlannerTab({ onOpenFile }: { onOpenFile: (p: string) => void }) 
         )
         return true
       } catch (e) {
+        if (runAbortRef.current) return false
         const msg = e instanceof Error ? e.message : String(e)
         setRunLog(`失败：${msg}`)
         const q = await loadRunQueue()

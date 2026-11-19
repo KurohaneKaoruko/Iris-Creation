@@ -1,21 +1,34 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useProject } from '../../state/ProjectContext'
 import { useTheme } from '../../state/ThemeContext'
-import { createNovelWork, forgetWork } from '../../api/backend'
+import { createProject, type ProjectItem, type ProjectKind } from '../../api/backend'
 import { DirPickerDialog } from './DirPickerDialog'
 import { Icon } from '../../components/Icon'
 import './LaunchScreen.css'
+
+const PROJECT_TYPES = [
+  { id: 'novel', label: '小说', icon: 'book-open', hint: '章节写作、人物设定、长篇规划' },
+  { id: 'screenplay', label: '剧本', icon: 'clapperboard', hint: '分场编排、对白动作、整稿导出' },
+] as const
+
+function projectSummary(p: ProjectItem) {
+  return `${p.kind === 'screenplay' ? `剧本 · ${p.scenes_count ?? 0} 场` : `小说 · ${p.chapters_count} 章`} · ${p.total_words.toLocaleString()} 字`
+}
 
 /**
  * 启动页：继续上次工程 / 打开目录（服务端目录浏览器点选）/ 最近工程 / 新建标准工程。
  */
 export function LaunchScreen() {
-  const { state, openDir, refresh, setError } = useProject()
+  const { state, openDir, opening, forget, setError } = useProject()
   const { theme, toggleTheme } = useTheme()
   const [pickerOpen, setPickerOpen] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [kind, setKind] = useState<ProjectKind>('novel')
   const [newName, setNewName] = useState('')
+  const [description, setDescription] = useState('')
+  const [createError, setCreateError] = useState('')
   const [busy, setBusy] = useState(false)
+  const createInFlight = useRef(false)
   const [query, setQuery] = useState('')
 
   const recent = [
@@ -28,36 +41,36 @@ export function LaunchScreen() {
   const lastName = lastPath?.split(/[/\\]/).filter(Boolean).pop() ?? ''
   const filteredRecent = recent
     .filter((p, i, arr) => arr.findIndex((x) => x.path === p.path) === i)
-    .filter((p) => !query.trim() || `${p.name} ${p.path}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    .filter((p) => !query.trim() || `${p.name} ${p.path} ${p.kind === 'screenplay' ? '剧本' : '小说'}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
 
-  // 「继续上次工程」卡片就绪动画
-  const [lastReady, setLastReady] = useState(false)
-  useEffect(() => {
-    const t = window.setTimeout(() => setLastReady(true), 60)
-    return () => window.clearTimeout(t)
-  }, [])
+  const open = (path: string) => { void openDir(path).catch(() => { /* error shown by ProjectContext */ }) }
 
   const handleCreate = useCallback(async () => {
     const name = newName.trim()
-    if (!name || busy) return
+    if (!name || opening || createInFlight.current) return
+    createInFlight.current = true
     setBusy(true)
+    setCreateError('')
+    setError(null)
     try {
-      const p = await createNovelWork(name)
+      const p = await createProject(name, kind, description.trim())
       setCreating(false)
       setNewName('')
-      await openDir(p.path)
+      setDescription('')
+      await openDir(p.path).catch(() => { /* creation succeeded; opening is reported separately */ })
     } catch (error) {
-      setError(`新建作品失败：${error instanceof Error ? error.message : String(error)}`)
+      setCreateError(`新建作品失败：${error instanceof Error ? error.message : String(error)}`)
     } finally {
+      createInFlight.current = false
       setBusy(false)
     }
-  }, [busy, newName, openDir, setError])
+  }, [description, kind, newName, openDir, opening, setError])
 
   return (
     <div className="launch">
       <header className="launch-head">
         <h1>Iris-Creation</h1>
-        <span className="launch-tagline">本地目录 · 全 Markdown · Agent 工作台</span>
+        <span className="launch-tagline">小说与剧本 · 本地创作工作台</span>
         <button className="launch-theme" onClick={toggleTheme} title="切换主题">
           <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={17} />
         </button>
@@ -66,46 +79,53 @@ export function LaunchScreen() {
       <main className="launch-main">
         {lastPath ? (
           <button
-            className={`launch-resume glass-panel ${lastReady ? 'in' : ''}`}
-            onClick={() => void openDir(lastPath)}
+            className="launch-resume glass-panel"
+            disabled={busy || opening}
+            onClick={() => open(lastPath)}
           >
             <span className="launch-resume-label"><Icon name="clock" size={13} />继续上次</span>
             <span className="launch-resume-name">{lastName}</span>
             <span className="launch-resume-meta">
-              {lastItem ? `${lastItem.chapters_count} 章 · ${lastItem.total_words.toLocaleString()} 字 · ` : ''}
+              {lastItem ? `${projectSummary(lastItem)} · ` : ''}
               {lastPath}
             </span>
             <span className="launch-resume-go"><Icon name="arrow-right" size={20} /></span>
           </button>
         ) : null}
 
-        <button className="launch-open glass-panel" onClick={() => setPickerOpen(true)}>
+        <button className="launch-open glass-panel" disabled={busy || opening} onClick={() => setPickerOpen(true)}>
           <span className="launch-open-icon"><Icon name="folder-open" size={44} strokeWidth={1.5} /></span>
           <span className="launch-open-title">打开目录…</span>
-          <span className="launch-open-desc">选择任意文件夹作为作品工程，所有内容都是 Markdown</span>
+          <span className="launch-open-desc">打开已有小说、剧本或 Markdown 资料目录</span>
         </button>
 
-        <button className="launch-new" onClick={() => setCreating(true)}>
+        <button className="launch-new" aria-expanded={creating} disabled={busy || opening} onClick={() => setCreating((value) => !value)}>
           <Icon name="plus" size={15} />
           新建作品工程
         </button>
 
         {creating ? (
-          <div className="launch-create glass-panel">
-            <input
-              value={newName}
-              placeholder="作品名，如「星海遗歌」"
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void handleCreate()
-                if (e.key === 'Escape') setCreating(false)
-              }}
-              autoFocus
-            />
-            <button className="launch-create-go" disabled={!newName.trim() || busy} onClick={() => void handleCreate()}>
-              创建并打开
-            </button>
-          </div>
+          <form className="launch-create glass-panel" onSubmit={(e) => { e.preventDefault(); void handleCreate() }} onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return
+            if (e.key === 'Escape' && !createInFlight.current) setCreating(false)
+          }}>
+            <fieldset disabled={busy || opening}>
+              <legend>作品类型</legend>
+              <div className="launch-types">
+                {PROJECT_TYPES.map((type) => <label key={type.id} className="launch-type">
+                  <input type="radio" name="project-kind" value={type.id} checked={type.id === kind} onChange={() => setKind(type.id)} />
+                  <span><Icon name={type.icon} size={20} /><strong>{type.label}</strong><small>{type.hint}</small></span>
+                </label>)}
+              </div>
+              <label className="launch-field">作品名<input required maxLength={100} value={newName} placeholder={kind === 'screenplay' ? '如「夜航」' : '如「星海遗歌」'} onChange={(e) => setNewName(e.target.value)} autoFocus /></label>
+              <label className="launch-field">一句话简介（可选）<input maxLength={300} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="主角想得到什么，又被什么挡住？" /></label>
+              <div className="launch-create-actions">
+                <button type="button" className="launch-create-cancel" onClick={() => setCreating(false)}>取消</button>
+                <button type="submit" className="launch-create-go" disabled={!newName.trim() || busy}>{busy ? '创建中…' : '创建并打开'}</button>
+              </div>
+            </fieldset>
+            {createError ? <p className="launch-create-error" role="alert">{createError}</p> : null}
+          </form>
         ) : null}
 
         {recent.length > 0 ? (
@@ -119,20 +139,20 @@ export function LaunchScreen() {
                 .slice(0, query.trim() ? 500 : 8)
                 .map((p) => (
                   <div key={p.path} className="launch-recent-item glass-panel">
-                    <button className="lr-open" onClick={() => void openDir(p.path)}>
+                    <button className="lr-open" disabled={busy || opening} onClick={() => open(p.path)}>
                       <span className="lr-name">{p.name}</span>
                       <span className="lr-meta">
-                        {p.chapters_count} 章 · {p.total_words.toLocaleString()} 字
+                        {projectSummary(p)}
                       </span>
                       <span className="lr-path">{p.path}</span>
                     </button>
-                    <button
+                    {p.source !== 'default' ? <button
                       className="lr-remove"
                       title="从最近列表移除（不删除文件）"
-                      onClick={() => void forgetWork(p.path).then(() => refresh())}
+                      onClick={() => void forget(p.path)}
                     >
                       <Icon name="x" size={13} />
-                    </button>
+                    </button> : null}
                   </div>
                 ))}
             </div>
@@ -146,7 +166,7 @@ export function LaunchScreen() {
         <DirPickerDialog
           onPick={(path) => {
             setPickerOpen(false)
-            void openDir(path)
+            open(path)
           }}
           onCancel={() => setPickerOpen(false)}
         />

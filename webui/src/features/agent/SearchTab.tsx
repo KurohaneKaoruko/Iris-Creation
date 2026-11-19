@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   SEARCH_SCOPES,
+  SCREENPLAY_SEARCH_SCOPES,
   MAX_TOTAL_HITS,
   collectScopeFiles,
   isValidQuery,
@@ -17,16 +18,19 @@ type Props = {
   onOpenFile: (path: string, location: SearchLocation) => void
   dialogOpen?: boolean
   visible?: boolean
+  screenplay?: boolean
+  workspaceRoot?: string
 }
 
 /**
  * 「检索」页签：作品级全文检索（stories/concept/outline）。
  * 千章级工程分批扫描（批间让出主线程），可随时取消或改词。
  */
-export function SearchTab({ onOpenFile, dialogOpen = true, visible = true }: Props) {
+export function SearchTab({ onOpenFile, dialogOpen = true, visible = true, screenplay = false, workspaceRoot }: Props) {
+  const scopeOptions = screenplay ? SCREENPLAY_SEARCH_SCOPES : SEARCH_SCOPES
   const [query, setQuery] = useState('')
   const [caseSensitive, setCaseSensitive] = useState(false)
-  const [scopes, setScopes] = useState<SearchScope[]>([...SEARCH_SCOPES.map((s) => s.id)])
+  const [scopes, setScopes] = useState<SearchScope[]>(() => scopeOptions.map((s) => s.id))
   const [hits, setHits] = useState<SearchHit[]>([])
   const [running, setRunning] = useState(false)
   const [scanned, setScanned] = useState(0)
@@ -68,11 +72,11 @@ export function SearchTab({ onOpenFile, dialogOpen = true, visible = true }: Pro
     setTotal(0)
     setTruncated(false)
     try {
-      const tree = await listWorkspaceTree(8, signal)
+      const tree = await listWorkspaceTree(8, signal, workspaceRoot)
       if (runId !== runIdRef.current) return
       const files = collectScopeFiles(tree, scopes)
       setTotal(files.length)
-      const r = await searchFiles(files, readText, q, {
+      const r = await searchFiles(files, (path, signal) => readText(path, signal, workspaceRoot), q, {
         caseSensitive,
         signal,
         onProgress: (p) => {
@@ -96,7 +100,7 @@ export function SearchTab({ onOpenFile, dialogOpen = true, visible = true }: Pro
         setRunning(false)
       }
     }
-  }, [caseSensitive, query, scopes])
+  }, [caseSensitive, query, scopes, workspaceRoot])
 
   const cancel = useCallback(() => {
     abortRun()
@@ -125,7 +129,7 @@ export function SearchTab({ onOpenFile, dialogOpen = true, visible = true }: Pro
   const resultQuery = submitted?.query ?? ''
   const resultCase = submitted?.caseSensitive ?? false
   const filtersChanged = submitted && (query.trim() !== resultQuery || caseSensitive !== resultCase ||
-    SEARCH_SCOPES.some(({ id }) => submitted.scopes.includes(id) !== scopes.includes(id)))
+    scopeOptions.some(({ id }) => submitted.scopes.includes(id) !== scopes.includes(id)))
 
   return (
     <div className="srch">
@@ -137,7 +141,7 @@ export function SearchTab({ onOpenFile, dialogOpen = true, visible = true }: Pro
             className="srch-input"
             aria-label="全文检索关键词"
             value={query}
-            placeholder="搜索全作品正文、设定、大纲…"
+            placeholder={screenplay ? '搜索场次、设定、大纲…' : '搜索全作品正文、设定、大纲…'}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
@@ -166,7 +170,7 @@ export function SearchTab({ onOpenFile, dialogOpen = true, visible = true }: Pro
 
       <div className="srch-filters">
         <span className="srch-filter-label">范围</span>
-        {SEARCH_SCOPES.map((s) => (
+        {scopeOptions.map((s) => (
           <button
             key={s.id}
             className={`srch-chip ${scopes.includes(s.id) ? 'on' : ''}`}
@@ -192,11 +196,11 @@ export function SearchTab({ onOpenFile, dialogOpen = true, visible = true }: Pro
 
       {submitted ? <div className="srch-result-info">
         {running ? '正在检索' : stopped ? '保留已完成的检索结果' : '检索结果'}：<strong>{resultQuery}</strong>
-        {' · '}{SEARCH_SCOPES.filter(({ id }) => submitted.scopes.includes(id)).map(({ zh }) => zh).join(' / ')}
+        {' · '}{scopeOptions.filter(({ id }) => submitted.scopes.includes(id)).map(({ zh }) => zh).join(' / ')}
         {resultCase ? ' · 区分大小写' : ''}{filtersChanged ? ' · 输入已修改，按 Enter 重新检索' : ''}
       </div> : null}
       {failed > 0 ? <div className="srch-warning" role="status">{failed} 个文件读取失败，结果可能不完整；请检查文件权限后重试。</div> : null}
-      {!running && !submitted ? <div className="tools-hint">按 Enter 搜索正文、设定与大纲。结果按文件分组，点击即可定位原文。</div> : null}
+      {!running && !submitted ? <div className="tools-hint">按 Enter 搜索{screenplay ? '场次' : '正文'}、设定与大纲。结果按文件分组，点击即可定位原文。</div> : null}
 
       {err ? <div className="tools-err">{err}</div> : null}
 

@@ -105,7 +105,8 @@ export function wsSend(message: Record<string, unknown>): boolean {
 
 type StreamEvtHandler = (event: string, payload: unknown) => void
 
-const streamSubs = new Set<StreamEvtHandler>()
+const streamSubs = new Set<{ handler: StreamEvtHandler; onDisconnect?: () => void }>()
+const streamReadyWaiters = new Set<() => void>()
 let streamWs: WebSocket | null = null
 let streamWsReady = false
 let streamRetryTimer: number | null = null
@@ -117,21 +118,26 @@ function ensureStreamWs(): void {
   const ws = new WebSocket(`${proto}://${location.host}/ws`)
   streamWs = ws
   ws.onopen = () => {
-    if (streamWs === ws) streamWsReady = true
+    if (streamWs !== ws) return
+    streamWsReady = true
+    for (const ready of streamReadyWaiters) ready()
   }
   ws.onmessage = (msg) => {
+    if (streamWs !== ws) return
     try {
       const data = JSON.parse(msg.data as string) as { event?: string; payload?: unknown }
       if (!data.event) return
-      for (const h of streamSubs) h(data.event, data.payload)
+      for (const sub of streamSubs) sub.handler(data.event, data.payload)
     } catch {
       // 忽略非 JSON 帧
     }
   }
   ws.onclose = () => {
     if (streamWs !== ws) return
+    const wasReady = streamWsReady
     streamWs = null
     streamWsReady = false
+    if (wasReady) for (const sub of streamSubs) sub.onDisconnect?.()
     // 还有订阅者（页面未关）时自动重连
     if (streamSubs.size > 0 && streamRetryTimer === null) {
       streamRetryTimer = window.setTimeout(() => {
@@ -145,39 +151,45 @@ function ensureStreamWs(): void {
   }
 }
 
-/** 订阅流式事件（共享 WS）。返回 {unlisten, waitReady}；连接已就绪时 waitReady 立即 resolve。 */
-export function subscribeStreamEvents(handler: StreamEvtHandler): {
+/** WS 握手完成才允许发起生成，已断开的流不能假设可重放。 */
+export function subscribeStreamEvents(handler: StreamEvtHandler, onDisconnect?: () => void): {
   unlisten: Unlisten
   waitReady: () => Promise<void>
 } {
-  streamSubs.add(handler)
+  const subscription = { handler, onDisconnect }
+  streamSubs.add(subscription)
   ensureStreamWs()
-  let cancelled = false
+  let closed = false
+  const cancels = new Set<() => void>()
   const waitReady = () =>
-    new Promise<void>((resolve) => {
-      if (cancelled) return resolve()
+    new Promise<void>((resolve, reject) => {
+      if (closed) return reject(new DOMException('连接已取消', 'AbortError'))
       if (streamWsReady) return resolve()
-      const t = window.setInterval(() => {
-        if (cancelled || streamWsReady) {
-          window.clearInterval(t)
-          resolve()
-        }
-      }, 30)
-      // 最多等 2 秒：WS 不可用时不能永远卡住，RPC 错误会自然浮出
-      window.setTimeout(() => {
-        window.clearInterval(t)
-        resolve()
-      }, 2000)
+      const cleanup = () => {
+        window.clearTimeout(timer)
+        streamReadyWaiters.delete(ready)
+        cancels.delete(cancel)
+      }
+      const ready = () => { cleanup(); resolve() }
+      const cancel = () => { cleanup(); reject(new DOMException('连接已取消', 'AbortError')) }
+      const timer = window.setTimeout(() => { cleanup(); reject(new Error('本地流式连接未就绪，请重试。')) }, 5000)
+      streamReadyWaiters.add(ready)
+      cancels.add(cancel)
     })
   return {
     unlisten: () => {
-      cancelled = true
-      streamSubs.delete(handler)
-      if (streamSubs.size === 0 && streamWs) {
-        const ws = streamWs
-        streamWs = null
-        streamWsReady = false
-        ws.close()
+      closed = true
+      for (const cancel of cancels) cancel()
+      streamSubs.delete(subscription)
+      if (streamSubs.size === 0) {
+        if (streamRetryTimer !== null) window.clearTimeout(streamRetryTimer)
+        streamRetryTimer = null
+        if (streamWs) {
+          const ws = streamWs
+          streamWs = null
+          streamWsReady = false
+          ws.close()
+        }
       }
     },
     waitReady,

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 pub struct DirEntryInfo {
   pub name: String,
   pub path: String,
-  /// 是否为作品工程（存在 .novel 目录或 stories/ 目录）
+  /// 是否为作品工程（本地元数据或正文目录）
   pub is_workspace: bool,
 }
 
@@ -28,7 +28,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn is_workspace_dir(p: &Path) -> bool {
-  p.join(".novel").is_dir() || p.join("stories").is_dir()
+  p.join(".novel").is_dir() || p.join("stories").is_dir() || p.join("scenes").is_dir()
 }
 
 /// 列出某目录下的子目录（跳过隐藏目录与常见噪音目录）。

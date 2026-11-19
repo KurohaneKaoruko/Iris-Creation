@@ -277,6 +277,7 @@
 }
 .studio-resultbar .ok:hover:not(:disabled) { background: var(--bg-tertiary); color: var(--text-primary); }
 .studio-resultbar .ok:disabled { opacity: 0.4; cursor: not-allowed; }
+.studio-result-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px; }
 
 .studio-resultbody {
   flex: 1;
@@ -309,6 +310,23 @@
 @media (max-width: 720px) {
   .studio-nav { width: 178px; }
   .studio-main { padding: 12px; }
+}
+
+@media (max-width: 560px) {
+  .studio-overlay { padding: 8px; }
+  .studio-dialog { width: 100%; max-height: calc(100dvh - 16px); }
+  .studio-layout { flex-direction: column; }
+  .studio-nav { display: flex; width: 100%; gap: 8px; overflow: auto; padding: 7px 10px; border-right: 0; border-bottom: 1px solid var(--border); max-height: 100px; }
+  .studio-nav > div { flex-shrink: 0; }
+  .studio-navitem { white-space: nowrap; }
+  .studio-main { min-height: 0; }
+  .studio-actions, .studio-fieldrow { flex-wrap: wrap; }
+  .studio-run, .studio-stop { white-space: nowrap; }
+  .studio-resultbar { flex-wrap: wrap; gap: 4px; }
+  .studio-result-actions { justify-content: flex-start; }
+  .studio-dialog .studio-savechapter { flex-wrap: wrap; }
+  .studio-dialog .studio-savechapter > input { min-width: 100%; }
+  .studio-saved-ok { overflow-wrap: anywhere; }
 }
 
 /* ============ 多稿对照 ============ */

@@ -1,5 +1,5 @@
-import { createContext, useContext, useCallback, useEffect, useState, type ReactNode } from 'react'
-import type { BookshelfState } from '../api/backend'
+import { createContext, useContext, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import type { BookshelfState, ProjectKind } from '../api/backend'
 import {
   forgetWork,
   getBookshelfState,
@@ -22,6 +22,8 @@ type ProjectContextValue = {
   workRoot: string | null
   /** 当前工程名（路径末段） */
   workName: string
+  workKind: ProjectKind
+  opening: boolean
   /** 错误（toast 显示） */
   error: string | null
   setError: (msg: string | null) => void
@@ -36,25 +38,34 @@ const Ctx = createContext<ProjectContextValue | null>(null)
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<BookshelfState | null>(null)
-  const [workRoot, setWorkRoot] = useState<string | null>(null)
+  const [work, setWork] = useState<{ root: string; kind: ProjectKind } | null>(null)
+  const [opening, setOpening] = useState(false)
+  const switchInFlight = useRef(false)
+  const shelfRequest = useRef(0)
   const [activePath, setActivePath] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
+    const request = ++shelfRequest.current
     try {
-      setState(await getBookshelfState())
+      const next = await getBookshelfState()
+      if (request === shelfRequest.current) setState(next)
     } catch (e) {
-      setError(`加载书架失败：${e instanceof Error ? e.message : String(e)}`)
+      if (request === shelfRequest.current) setError(`加载书架失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }, [])
 
   const openDir = useCallback(
     async (path: string) => {
       const p = path.trim()
-      if (!p) return
+      if (!p || switchInFlight.current) return
+      switchInFlight.current = true
+      setOpening(true)
+      setError(null)
       try {
-        await setWorkspace(p)
-        setWorkRoot(p)
+        const workspace = await setWorkspace(p)
+        // 保留旧版使用的路径键，避免升级后找不到本地恢复草稿和最近文件。
+        setWork({ root: p, kind: workspace.kind === 'screenplay' ? 'screenplay' : 'novel' })
         setActivePath(null)
         // 登记到最近列表（外部工程），失败不影响打开
         try {
@@ -64,6 +75,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       } catch (e) {
         setError(`打开目录失败：${e instanceof Error ? e.message : String(e)}`)
         throw e
+      } finally {
+        switchInFlight.current = false
+        setOpening(false)
       }
     },
     [refresh],
@@ -97,16 +111,19 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     void refresh()
   }, [refresh])
 
+  const workRoot = work?.root ?? null
+  const workKind = work?.kind ?? 'novel'
   const workName = workRoot?.split(/[/\\]/).filter(Boolean).pop() ?? ''
 
   const closeWork = useCallback(() => {
-    setWorkRoot(null)
+    setWork(null)
     setActivePath(null)
-  }, [])
+    void refresh()
+  }, [refresh])
 
   return (
     <Ctx.Provider
-      value={{ state, refresh, openDir, remember, forget, workRoot, workName, error, setError, activePath, setActivePath, closeWork }}
+      value={{ state, refresh, openDir, remember, forget, workRoot, workName, workKind, opening, error, setError, activePath, setActivePath, closeWork }}
     >
       {children}
     </Ctx.Provider>

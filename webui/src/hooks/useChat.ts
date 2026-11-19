@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { subscribeEvent, wsSend, type Unlisten } from '../api/rpc'
+import { subscribeStreamEvents } from '../api/rpc'
 import { chatCancelStream, chatGenerateStream, type ChatMessagePayload } from '../api/backend'
 
 /** 常见后端错误 → 中文用户话术；未命中时原样透传 */
@@ -53,6 +53,7 @@ export type ChatItem = {
   streaming?: boolean
   streamId?: string
   failed?: string
+  stopped?: boolean
   /** 本条 assistant 消息期间的工具步骤 */
   steps?: AgentStep[]
 }
@@ -87,53 +88,46 @@ function sid(p: ChatEventPayload): string | null {
 let seq = 0
 const newId = () => `m-${Date.now()}-${(seq += 1)}`
 
-export function useChat() {
+type ChatRun = { id: string; output: string; request?: Promise<void>; timer?: number }
+
+function cancelRemote(run: ChatRun) {
+  // A cancel cannot reach the server before the start RPC has registered the task.
+  if (run.request) void run.request.then(() => chatCancelStream(run.id)).catch(() => {})
+}
+
+export function useChat(workspaceRoot?: string) {
   const [messages, setMessages] = useState<ChatItem[]>([])
   const [busy, setBusy] = useState(false)
-  const streamOutputRef = useRef(new Map<string, string>())
-  /**
-   * 当前活跃流 ID。必须在发出 RPC **之前**设置：
-   * 事件订阅在组件挂载时就已建立（下面的 effect 只跑一次），
-   * 用 ref 过滤事件即可，不存在"订阅晚于事件"的竞态。
-   */
-  const activeStreamIdRef = useRef<string | null>(null)
+  const activeRun = useRef<ChatRun | null>(null)
+  const subscription = useRef<ReturnType<typeof subscribeStreamEvents> | null>(null)
   /** 最新消息列表镜像（供 resendFrom 读取，避免闭包过期） */
   const messagesRef = useRef<ChatItem[]>([])
   useEffect(() => {
     messagesRef.current = messages
   }, [messages])
 
-  const finishStream = useCallback((streamId: string, patch: Partial<ChatItem>) => {
-    if (activeStreamIdRef.current === streamId) {
-      activeStreamIdRef.current = null
-      setBusy(false)
-    }
-    setMessages((ms) => ms.map((m) => (m.streamId === streamId ? { ...m, streaming: false, ...patch } : m)))
+  const finishStream = useCallback((run: ChatRun, patch: Partial<ChatItem>) => {
+    if (activeRun.current !== run) return false
+    activeRun.current = null
+    window.clearTimeout(run.timer)
+    setBusy(false)
+    setMessages((ms) => ms.map((m) => (m.streamId === run.id ? { ...m, streaming: false, ...patch } : m)))
+    return true
   }, [])
 
   useEffect(() => {
-    const ups: Unlisten[] = []
-
-    ups.push(
-      subscribeEvent('ai_stream_token', (raw) => {
-        const p = (raw ?? {}) as ChatEventPayload
-        const id = sid(p)
-        if (!id || id !== activeStreamIdRef.current) return
+    const sub = subscribeStreamEvents((event, raw) => {
+      const p = (raw ?? {}) as ChatEventPayload
+      const run = activeRun.current
+      if (!run || sid(p) !== run.id) return
+      const id = run.id
+      if (event === 'ai_stream_token') {
         const token = typeof p.token === 'string' ? p.token : ''
         if (!token) return
-        const prev = streamOutputRef.current.get(id) ?? ''
-        streamOutputRef.current.set(id, prev + token)
-        const text = streamOutputRef.current.get(id) ?? ''
+        run.output += token
+        const text = run.output
         setMessages((ms) => ms.map((m) => (m.streamId === id ? { ...m, content: text } : m)))
-      }),
-    )
-
-    // 工具步骤事件（ReAct 循环）：追加/更新到当前 assistant 消息的 steps
-    ups.push(
-      subscribeEvent('ai_agent_step', (raw) => {
-        const p = (raw ?? {}) as ChatEventPayload
-        const id = sid(p)
-        if (!id || id !== activeStreamIdRef.current) return
+      } else if (event === 'ai_agent_step') {
         const actionId = p.actionId ?? `s-${p.step ?? 0}`
         setMessages((ms) => {
           const idx = ms.findIndex((m) => m.streamId === id)
@@ -159,47 +153,39 @@ export function useChat() {
           }
           if (existing >= 0) steps[existing] = incoming
           else steps.push(incoming)
-          ms[idx] = { ...target, steps }
-          return [...ms]
+          return ms.map((message, index) => index === idx ? { ...target, steps } : message)
         })
-      }),
-    )
-
-    // 错误：后端 ai_error 后不一定跟 ai_stream_done，必须自行终止流
-    ups.push(
-      subscribeEvent('ai_error', (raw) => {
-        const p = (raw ?? {}) as ChatEventPayload
-        const id = sid(p)
-        if (!id || id !== activeStreamIdRef.current) return
+      } else if (event === 'ai_error') {
         const msg = typeof p.message === 'string' && p.message ? p.message : '生成失败（Provider 未配置或网络错误）'
-        finishStream(id, { failed: localizeError(msg) })
-      }),
-    )
-
-    ups.push(
-      subscribeEvent('ai_stream_done', (raw) => {
-        const p = (raw ?? {}) as ChatEventPayload
-        const id = sid(p)
-        if (!id || id !== activeStreamIdRef.current) return
-        const text = streamOutputRef.current.get(id) ?? ''
-        finishStream(id, {
-          content: text,
-          failed: text.trim() ? undefined : '未收到任何回复，请检查 Provider / API Key 配置',
+        finishStream(run, { failed: localizeError(msg) })
+      } else if (event === 'ai_stream_done') {
+        finishStream(run, p.cancelled ? { stopped: true, content: run.output } : {
+          content: run.output,
+          failed: run.output.trim() ? undefined : '未收到任何回复，请检查 Provider / API Key 配置',
         })
-      }),
-    )
+      }
+    }, () => {
+      const run = activeRun.current
+      if (run?.request && finishStream(run, { failed: '流式连接已断开，当前回复可能不完整。' })) cancelRemote(run)
+    })
+    subscription.current = sub
 
     return () => {
-      for (const u of ups) u()
+      const run = activeRun.current
+      activeRun.current = null
+      subscription.current = null
+      sub.unlisten()
+      if (run) { window.clearTimeout(run.timer); cancelRemote(run) }
     }
   }, [finishStream])
 
   const startStream = useCallback(
     (userText: string, history: ChatMessagePayload[], opts?: { systemPrompt?: string; assistantId?: string | null; providerId?: string | null }) => {
+      const sub = subscription.current
+      if (!sub || activeRun.current) return
       const streamId = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      streamOutputRef.current.set(streamId, '')
-      // 先挂 ref 再发 RPC；订阅自挂载起一直在线，事件不会丢
-      activeStreamIdRef.current = streamId
+      const run: ChatRun = { id: streamId, output: '' }
+      activeRun.current = run
       setBusy(true)
       setMessages((ms) => [
         ...ms,
@@ -209,51 +195,48 @@ export function useChat() {
 
       const withSys: ChatMessagePayload[] = [...history, { role: 'user', content: userText }]
       if (opts?.systemPrompt) withSys.unshift({ role: 'system', content: opts.systemPrompt })
-      void chatGenerateStream({
-        streamId,
-        messages: withSys,
-        assistantId: opts?.assistantId ?? null,
-        providerId: opts?.providerId ?? null,
+      void sub.waitReady().then(() => {
+        if (activeRun.current !== run) return
+        run.timer = window.setTimeout(() => {
+          if (finishStream(run, { failed: '等待完整回复超时，请重试。' })) cancelRemote(run)
+        }, 260000)
+        run.request = chatGenerateStream({
+          streamId, messages: withSys, workspaceRoot,
+          assistantId: opts?.assistantId ?? null,
+          providerId: opts?.providerId ?? null,
+        })
+        return run.request
       }).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e)
-        finishStream(streamId, { failed: localizeError(msg) })
+        finishStream(run, { failed: localizeError(msg) })
       })
     },
-    [finishStream],
+    [finishStream, workspaceRoot],
   )
 
   const send = useCallback(
     async (userText: string, opts?: { assistantId?: string | null; providerId?: string | null; systemPrompt?: string; useMarkdown?: boolean }) => {
       const text = userText.trim()
-      if (!text || busy) return
+      if (!text || activeRun.current) return
       const history: ChatMessagePayload[] = messagesRef.current.map((m) => ({ role: m.role, content: m.content }))
       startStream(text, history, opts)
     },
-    [busy, startStream],
+    [startStream],
   )
 
   const cancel = useCallback(() => {
-    const id = activeStreamIdRef.current
-    if (!id) return
-    if (!wsSend({ type: 'cancel', streamId: id })) {
-      void chatCancelStream(id).catch(() => {})
-    }
-  }, [])
+    const run = activeRun.current
+    if (run && finishStream(run, { stopped: true, content: run.output })) cancelRemote(run)
+  }, [finishStream])
 
   const clear = useCallback(() => {
     cancel()
-    activeStreamIdRef.current = null
-    setBusy(false)
     setMessages([])
-    streamOutputRef.current.clear()
   }, [cancel])
 
   const restore = useCallback(
     (msgs: Array<{ role: ChatRole; content: string }>) => {
       cancel()
-      activeStreamIdRef.current = null
-      setBusy(false)
-      streamOutputRef.current.clear()
       setMessages(msgs.map((m) => ({ id: newId(), role: m.role === 'assistant' ? ('assistant' as const) : ('user' as const), content: String(m.content ?? '') })))
     },
     [cancel],
@@ -263,7 +246,6 @@ export function useChat() {
   const resendFrom = useCallback(
     (userText: string, opts?: { systemPrompt?: string }) => {
       cancel()
-      streamOutputRef.current.clear()
       const ms = messagesRef.current
       const idx = ms.map((m) => m.role).lastIndexOf('user')
       const keptHist = (idx >= 0 ? ms.slice(0, idx) : []).map((m) => ({ role: m.role, content: m.content }) as ChatMessagePayload)

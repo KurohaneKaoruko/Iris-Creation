@@ -7,14 +7,14 @@ import { editorDraftKey } from '../../api/editorDraft'
 
 const state = vi.hoisted(() => ({
   disk: '# 正文\n原稿',
-  readText: vi.fn(), write: vi.fn(), forceWrite: vi.fn(), closeWork: vi.fn(), setError: vi.fn(),
+  readText: vi.fn(), write: vi.fn(), closeWork: vi.fn(), setError: vi.fn(),
   setActivePath: vi.fn(), events: new Map<string, (value: unknown) => void>(),
   chat: { messages: [], busy: false, send: vi.fn(), clear: vi.fn(), restore: vi.fn(), cancel: vi.fn(), resendFrom: vi.fn() },
 }))
 
 vi.mock('../../api/backend', async (original) => ({
   ...await original<typeof import('../../api/backend')>(),
-  readText: state.readText, writeTextIfCurrent: state.write, writeText: state.forceWrite,
+  readText: state.readText, writeTextIfCurrent: state.write,
   getSkills: async () => [], getAppSettings: async () => ({ providers: [] }),
   listChatSessions: async () => [],
   listWorkspaceTree: async () => ({ name: 'test', kind: 'dir', path: '', children: [{ name: 'stories', kind: 'dir', path: 'stories', children: [
@@ -65,8 +65,10 @@ beforeEach(async () => {
   vi.clearAllMocks()
   state.disk = '# 正文\n原稿'
   state.readText.mockImplementation(async () => state.disk)
-  state.write.mockImplementation(async (_path: string, value: string) => { state.disk = value })
-  state.forceWrite.mockImplementation(async (_path: string, value: string) => { state.disk = value })
+  state.write.mockImplementation(async (_path: string, value: string, expected: string) => {
+    if (expected !== state.disk) throw new Error('file changed on disk')
+    state.disk = value
+  })
   localStorage.clear()
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: vi.fn() })
@@ -91,7 +93,7 @@ describe('editor safety interactions', () => {
     expect(container.querySelector<HTMLTextAreaElement>('[aria-label="正文编辑器"]')?.value).toBe('新的正文')
     await click('关闭工程')
     await click('保存并继续')
-    expect(state.write).toHaveBeenCalledWith('stories/one.md', '新的正文', '# 正文\n原稿')
+    expect(state.write).toHaveBeenCalledWith('stories/one.md', '新的正文', '# 正文\n原稿', '/test-work')
     expect(state.closeWork).toHaveBeenCalledOnce()
   })
 
@@ -108,11 +110,33 @@ describe('editor safety interactions', () => {
     await edit('用户草稿')
     state.disk = 'Agent 新版本'
     await click('保存')
-    expect(state.write).not.toHaveBeenCalled()
-    expect(state.forceWrite).not.toHaveBeenCalled()
+    expect(state.disk).toBe('Agent 新版本')
     expect(container.textContent).toContain('磁盘内容已被其他操作修改')
     await click('仍覆盖')
-    expect(state.forceWrite).toHaveBeenCalledWith('stories/one.md', '用户草稿')
+    expect(state.write).toHaveBeenLastCalledWith('stories/one.md', '用户草稿', 'Agent 新版本', '/test-work')
+    expect(state.disk).toBe('用户草稿')
+  })
+
+  it('keeps the original baseline after recovery and requires reconfirmation after a third disk edit', async () => {
+    const key = editorDraftKey('/test-work', 'stories/one.md')
+    localStorage.setItem(key, JSON.stringify({ baseContent: '旧原稿', draft: '待恢复的段落', savedAt: Date.now() }))
+    state.disk = '外部新版'
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await act(async () => root.render(<AgentWorkspace />))
+    await click('预览')
+    await click('恢复草稿')
+    expect(container.textContent).toContain('磁盘内容已被其他操作修改')
+    await click('保存')
+    expect(state.write).toHaveBeenLastCalledWith('stories/one.md', '待恢复的段落', '旧原稿', '/test-work')
+    expect(state.disk).toBe('外部新版')
+    state.disk = '第三版'
+    await click('仍覆盖')
+    expect(state.disk).toBe('第三版')
+    expect(container.querySelector<HTMLTextAreaElement>('[aria-label="正文编辑器"]')?.value).toBe('待恢复的段落')
+    await click('仍覆盖')
+    expect(state.disk).toBe('待恢复的段落')
+    expect(localStorage.getItem(key)).toBeNull()
   })
 
   it('persists a recovery draft and clears it when edits are reverted', async () => {

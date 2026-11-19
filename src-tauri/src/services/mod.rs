@@ -9,6 +9,7 @@ pub mod bookshelf;
 pub mod chat;
 pub mod dir_browse;
 pub mod fs;
+pub(crate) mod screenplay;
 pub mod settings;
 pub mod workspace;
 

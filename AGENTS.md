@@ -4,9 +4,9 @@
 
 ## 项目概述
 
-Iris-Creation 是一个基于 **Tauri v2 + React + Lexical** 构建的桌面小说写作工作台。它不是通用 IDE，而是专注于小说作者需求的工具：
+Iris-Creation 是基于 **Tauri v2 + React** 的本地小说／剧本创作工作台：
 - 作品与资料管理
-- 章节写作与改稿
+- 章节写作、分场编排与改稿
 - AI 规划、审阅与长期记忆
 - 人物、关系、线索与连续性维护
 
@@ -45,6 +45,7 @@ pnpm run tauri:ios:dev
 - **`api/documents.ts`** - 文档索引、章节标题读取、文件名/标题/路径多关键词排序、工作区隔离的最近文档；排除隐藏/生成目录，同名引用有歧义时不得随意打开第一个
 - **`api/markdown.ts`** - 预览与目录共用的带源行块解析；支持 CRLF、反引号/波浪线围栏和重复标题锚点，检索定位必须使用源行，不能按渲染高度比例猜测
 - **`api/novel.ts`** - 作品内数据层：章节元数据、人物卡、设定集 Codex、情节线、记忆索引、写作历史、章节排序（Markdown/JSON 直读直写，`parseCharacters`/`parsePlotLines`/`parseCodex` 等纯函数有单测）；工坊结果直写章节（`chapterBodyFromResult` 剥 AI 首行标题 + `createChapterWithContent` 落盘登记）
+- **`api/screenplay.ts` / `services/screenplay.rs`** - 剧本场次、场景信息、编排、导出与剧本工坊模板。使用 `workspaceRoot` 绑定剧本 RPC；排序以旧列表为基线，不改场次文件名；剧本 Agent 只读工程参考资料。
 - **`api/planner.ts`** - 规划队列：run-queue.md JSON frontmatter 读写 + 大纲→任务链导入（`parseOutlineChapters`/`outlineToTasks`，与旧桌面端格式兼容）；AI 拆解（`buildTaskDraftPrompt`+`parseAiTasks`，id/依赖链重建防 AI 输出不可信字段）；UI 在 ToolsDialog「任务队列」页签（拆解/导入/逐章生成/连续生成）
 - **`api/stylefp.ts`** - 文风指纹持久化（concept/style-fingerprint.json，随工程走）：工坊学习一次全工程共用——StudioDialog 学/存/删，PlannerTab 逐章生成自动携带
 - **`api/lint.ts`** - 正文铁律体检：对齐 novel-ai-lexicon 的规则引擎（一级套路/二级限频/句式模板）
@@ -113,6 +114,8 @@ pnpm run tauri:ios:dev
   stories/   # 正文章节（.md）
   .novel/    # 状态、缓存、历史、索引
 ```
+
+剧本使用 `scenes/` 的直属 Markdown 文件代替 `stories/`；`.novel/work.json` 保存 `kind: "screenplay"`，`.novel/.settings/scene-order.json` 保存编排。无类型字段的旧作品按小说处理。场次标题写在文件首行，稳定文件名用于后续分镜关联。路线见 `docs/creative-workflow.md`。
 
 ### 应用数据位置
 

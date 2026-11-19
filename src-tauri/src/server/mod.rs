@@ -266,12 +266,13 @@ async fn ws_upgrade(
       .body(axum::body::Body::from("forbidden origin"))
       .unwrap();
   }
-  ws.on_upgrade(move |socket| ws_handle(ctx, socket))
+  // Subscribe before completing the handshake so a fast RPC after `onopen` cannot miss early tokens.
+  let rx = ctx.broadcast.subscribe();
+  ws.on_upgrade(move |socket| ws_handle(ctx, socket, rx))
 }
 
-async fn ws_handle(ctx: ServerContext, socket: axum::extract::ws::WebSocket) {
+async fn ws_handle(ctx: ServerContext, socket: axum::extract::ws::WebSocket, mut rx: tokio::sync::broadcast::Receiver<(String, Value)>) {
   use futures_util::{SinkExt, StreamExt};
-  let mut rx = ctx.broadcast.subscribe();
   let (mut tx, mut rx_from_client) = socket.split();
   loop {
     tokio::select! {
@@ -284,7 +285,8 @@ async fn ws_handle(ctx: ServerContext, socket: axum::extract::ws::WebSocket) {
               break;
             }
           }
-          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+          // A skipped frame could include a token or terminal error. Close rather than reporting partial text as complete.
+          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
           Err(_) => break,
         }
       }

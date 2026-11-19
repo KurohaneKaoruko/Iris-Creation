@@ -10,7 +10,6 @@ use crate::ai_types::ChatMessage;
 use crate::secrets;
 use crate::services::settings::resolve_chat_provider;
 use crate::commands::normalize_plaintext;
-use crate::services::workspace::get_workspace_root;
 use std::collections::HashMap;
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -230,6 +229,7 @@ impl LiveEmitGate {
         if final_prefix_full {
           // FINAL: 前缀剥掉，正文继续流出
           self.mode = LiveEmitMode::Emit;
+          if let Some(s) = session { s.emit_token(&self.probe.trim_start()[7..]); }
           self.probe.clear();
           return;
         }
@@ -259,28 +259,46 @@ impl LiveEmitGate {
   }
 }
 
-fn sse_take_line(buffer: &mut String) -> Option<String> {
-  let pos = buffer.find('\n')?;
-  let mut line = buffer[..pos].to_string();
-  if line.ends_with('\r') {
-    line.pop();
+/// A network chunk may end inside a UTF-8 character. Decode complete SSE lines only.
+async fn read_sse(
+  response: reqwest::Response,
+  mut on_data: impl FnMut(&str) -> Result<bool, String>,
+) -> Result<bool, String> {
+  fn dispatch(line: &[u8], on_data: &mut impl FnMut(&str) -> Result<bool, String>) -> Result<bool, String> {
+    let line = std::str::from_utf8(line).map_err(|e| format!("stream decode failed: {e}"))?;
+    match line.strip_prefix("data:").map(str::trim).filter(|data| !data.is_empty()) {
+      Some(data) => on_data(data),
+      None => Ok(false),
+    }
   }
-  buffer.drain(..=pos);
-  Some(line)
+  let mut pending = Vec::new();
+  let mut stream = response.bytes_stream();
+  while let Some(bytes) = stream.next().await {
+    let bytes = bytes.map_err(|e| format!("stream read failed: {e}"))?;
+    let mut lines = bytes.split(|byte| *byte == b'\n').peekable();
+    while let Some(line) = lines.next() {
+      if pending.len().saturating_add(line.len()) > 4 * 1024 * 1024 { return Err("stream event exceeds 4 MiB".into()); }
+      pending.extend_from_slice(line);
+      if lines.peek().is_some() {
+        if dispatch(&pending, &mut on_data)? { return Ok(true); }
+        pending.clear();
+      }
+    }
+  }
+  dispatch(&pending, &mut on_data)
 }
 
 
 #[allow(non_snake_case)]
 pub(crate) fn chat_generate_stream_service(
   sink: crate::event_sink::SharedEventSink,
-  state: &crate::state::AppState,
+  workspace_root: std::path::PathBuf,
   stream_id: String,
   messages: Vec<ChatMessage>,
   use_markdown: bool,
   agent_id: Option<String>,
   provider_id: Option<String>,
 ) -> Result<(), String> {
-  let workspace_root = get_workspace_root(state)?;
   let stream_id_for_task = stream_id.clone();
   let sink_for_task = sink.clone();
   let requested_provider_id = provider_id.clone();
@@ -554,7 +572,8 @@ pub(crate) fn chat_generate_stream_service(
       response = normalize_plaintext(&response);
     }
 
-    if ai_edit_apply_mode == app_settings::AiEditApplyMode::Review {
+    if ai_edit_apply_mode == app_settings::AiEditApplyMode::Review
+      && crate::services::bookshelf::project_kind(&workspace_root_clone) != crate::services::bookshelf::ProjectKind::Screenplay {
       match crate::ai_response_parser::parse_ai_response(&response, &workspace_root_clone) {
         Ok(Some(cs)) => {
           let payload = serde_json::json!({
@@ -856,59 +875,27 @@ pub(crate) async fn call_openai_unbounded(
           return Err(format!("http {status}: {raw}"));
         }
 
-        let mut sse_buf = String::new();
-        let mut round_unique = String::new();
-        let mut finish_reason: Option<String> = None;
-        let mut body_stream = resp.bytes_stream();
-        while let Some(item) = body_stream.next().await {
-          let bytes = item.map_err(|e| format!("stream read failed: {e}"))?;
-          sse_buf.push_str(&String::from_utf8_lossy(&bytes));
-          while let Some(line) = sse_take_line(&mut sse_buf) {
-            if let Some(data) = line.strip_prefix("data:") {
-              let data = data.trim();
-              if data.is_empty() || data == "[DONE]" {
-                continue;
-              }
-              let value: serde_json::Value =
-                serde_json::from_str(data).map_err(|e| format!("stream parse failed: {e}; data={data}"))?;
-              if let Some(reason) = value["choices"][0]["finish_reason"].as_str() {
-                finish_reason = Some(reason.to_string());
-              }
-              if let Some(content) = value["choices"][0]["delta"]["content"].as_str() {
-                let (_, unique_piece) = append_chunk_with_overlap(&mut full_text, content);
-                if !unique_piece.is_empty() {
-                  round_unique.push_str(unique_piece.as_str());
-                  gate.push(live_stream, unique_piece.as_str());
-                }
-              }
-            }
+        let mut chunk = String::new();
+        let mut finish_reason = None;
+        let ended = read_sse(resp, |data| {
+          if data == "[DONE]" { return Ok(true); }
+          let value: serde_json::Value = serde_json::from_str(data).map_err(|e| format!("stream parse failed: {e}"))?;
+          if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+            return Err(format!("Provider 流式错误：{}", compact_value_preview(error, 240)));
           }
-        }
-        if !sse_buf.trim().is_empty() {
-          let line = sse_buf.trim();
-          if let Some(data) = line.strip_prefix("data:") {
-            let data = data.trim();
-            if !data.is_empty() && data != "[DONE]" {
-              let value: serde_json::Value =
-                serde_json::from_str(data).map_err(|e| format!("stream parse failed: {e}; data={data}"))?;
-              if let Some(reason) = value["choices"][0]["finish_reason"].as_str() {
-                finish_reason = Some(reason.to_string());
-              }
-              if let Some(content) = value["choices"][0]["delta"]["content"].as_str() {
-                let (_, unique_piece) = append_chunk_with_overlap(&mut full_text, content);
-                if !unique_piece.is_empty() {
-                  round_unique.push_str(unique_piece.as_str());
-                  gate.push(live_stream, unique_piece.as_str());
-                }
-              }
-            }
+          if let Some(reason) = value["choices"][0]["finish_reason"].as_str() { finish_reason = Some(reason.to_owned()); }
+          if let Some(content) = value["choices"][0]["delta"]["content"].as_str() {
+            chunk.push_str(content);
+            if round == 0 { gate.push(live_stream, content); }
           }
-        }
-        if round_unique.is_empty() && finish_reason.is_none() {
+          Ok(false)
+        }).await?;
+        if !ended && !chunk.is_empty() && finish_reason.is_none() { return Err("Provider 流提前关闭：未收到完成标记。".into()); }
+        if !ended && chunk.is_empty() && finish_reason.is_none() {
           stream_supported = false;
           continue;
         }
-        break (round_unique, finish_reason, true);
+        break (chunk, finish_reason, true);
       } else {
         let mut body = serde_json::json!({
           "model": cfg.model_name,
@@ -950,12 +937,8 @@ pub(crate) async fn call_openai_unbounded(
       }
     };
 
-    if stream_applied && chunk.is_empty() && finish_reason.is_none() {
-      stream_supported = false;
-      continue;
-    }
-
-    let unique_chunk = if stream_applied {
+    let unique_chunk = if stream_applied && round == 0 {
+      full_text.push_str(&chunk);
       chunk
     } else {
       let (overlap, unique_chunk) = append_chunk_with_overlap(&mut full_text, chunk.as_str());
@@ -1066,46 +1049,33 @@ pub(crate) async fn call_anthropic_unbounded(
         return Err(format!("http {status}: {raw}"));
       }
 
-      let mut sse_buf = String::new();
-      let mut round_unique = String::new();
-      let mut stop_reason: Option<String> = None;
-      let mut body_stream = resp.bytes_stream();
-      while let Some(item) = body_stream.next().await {
-        let bytes = item.map_err(|e| format!("stream read failed: {e}"))?;
-        sse_buf.push_str(&String::from_utf8_lossy(&bytes));
-        while let Some(line) = sse_take_line(&mut sse_buf) {
-          if let Some(data) = line.strip_prefix("data:") {
-            let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
-              continue;
-            }
-            let value: serde_json::Value =
-              serde_json::from_str(data).map_err(|e| format!("stream parse failed: {e}; data={data}"))?;
-            match value["type"].as_str().unwrap_or_default() {
-              "content_block_delta" => {
-                if let Some(text) = value["delta"]["text"].as_str() {
-                  let (_, unique_piece) = append_chunk_with_overlap(&mut full_text, text);
-                  if !unique_piece.is_empty() {
-                    round_unique.push_str(unique_piece.as_str());
-                    gate.push(live_stream, unique_piece.as_str());
-                  }
-                }
-              }
-              "message_delta" => {
-                if let Some(reason) = value["delta"]["stop_reason"].as_str() {
-                  stop_reason = Some(reason.to_string());
-                }
-              }
-              _ => {}
+      let mut chunk = String::new();
+      let mut stop_reason = None;
+      let ended = read_sse(resp, |data| {
+        if data == "[DONE]" { return Ok(true); }
+        let value: serde_json::Value = serde_json::from_str(data).map_err(|e| format!("stream parse failed: {e}"))?;
+        match value["type"].as_str() {
+          Some("error") => return Err(format!("Provider 流式错误：{}", compact_value_preview(&value["error"], 240))),
+          Some("message_stop") => return Ok(true),
+          Some("content_block_delta") => {
+            if let Some(text) = value["delta"]["text"].as_str() {
+              chunk.push_str(text);
+              if round == 0 { gate.push(live_stream, text); }
             }
           }
+          Some("message_delta") => {
+            if let Some(reason) = value["delta"]["stop_reason"].as_str() { stop_reason = Some(reason.to_owned()); }
+          }
+          _ => {}
         }
-      }
-      if round_unique.is_empty() && stop_reason.is_none() {
+        Ok(false)
+      }).await?;
+      if !ended && !chunk.is_empty() && stop_reason.is_none() { return Err("Provider 流提前关闭：未收到完成标记。".into()); }
+      if !ended && chunk.is_empty() && stop_reason.is_none() {
         stream_supported = false;
         continue;
       }
-      (round_unique, stop_reason, true)
+      (chunk, stop_reason, true)
     } else {
       let body = serde_json::json!({
         "model": cfg.model_name,
@@ -1149,7 +1119,8 @@ pub(crate) async fn call_anthropic_unbounded(
       continue;
     }
 
-    let unique_chunk = if stream_applied {
+    let unique_chunk = if stream_applied && round == 0 {
+      full_text.push_str(&chunk);
       chunk
     } else {
       let (overlap, unique_chunk) = append_chunk_with_overlap(&mut full_text, chunk.as_str());

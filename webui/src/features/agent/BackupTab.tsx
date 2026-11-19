@@ -12,8 +12,8 @@ import { useProject } from '../../state/ProjectContext'
 import './BackupTab.css'
 
 /** 单文件清单采集：读内容 → 字数（去空白）+ 字节 + SHA-256 */
-async function collectEntry(path: string): Promise<BackupFileEntry> {
-  const content = await readText(path)
+async function collectEntry(path: string, workspace?: string): Promise<BackupFileEntry> {
+  const content = await readText(path, undefined, workspace)
   return {
     path,
     words: content.replace(/\s/g, '').length,
@@ -28,7 +28,8 @@ async function collectEntry(path: string): Promise<BackupFileEntry> {
  * hash 清单用于日后核对内容是否被改动；完整目录冷备份建议用系统工具。
  */
 export function BackupTab() {
-  const { workName } = useProject()
+  const { workName, workRoot } = useProject()
+  const workspace = workRoot ?? undefined
   const [files, setFiles] = useState<string[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -38,13 +39,14 @@ export function BackupTab() {
   useEffect(() => {
     void (async () => {
       try {
-        const tree = await listWorkspaceTree(8)
+        const tree = await listWorkspaceTree(8, undefined, workspace)
         setFiles(collectBackupFiles(tree))
-      } catch {
+      } catch (error) {
+        setErr(`扫描失败：${error instanceof Error ? error.message : String(error)}`)
         setFiles([])
       }
     })()
-  }, [])
+  }, [workspace])
 
   const run = useCallback(async () => {
     const snapshotFiles = files ?? []
@@ -59,21 +61,21 @@ export function BackupTab() {
       const BATCH = 12
       for (let i = 0; i < snapshotFiles.length; i += BATCH) {
         const batch = snapshotFiles.slice(i, i + BATCH)
-        entries.push(...(await Promise.all(batch.map((p) => collectEntry(p)))))
+        entries.push(...(await Promise.all(batch.map((p) => collectEntry(p, workspace)))))
         setProgress(Math.min(snapshotFiles.length, i + BATCH))
         await new Promise((r) => setTimeout(r, 0))
       }
-      await createDir('exports/backups').catch(() => {})
+      await createDir('exports/backups', workspace)
       const filename = buildExportFilename(workName || '未命名作品', 'backup', 'md')
       const relPath = `exports/backups/${filename}`
-      await writeText(relPath, assembleBackupReport({ workName: workName || '未命名作品', files: entries }))
+      await writeText(relPath, assembleBackupReport({ workName: workName || '未命名作品', files: entries }), workspace)
       setDone(relPath)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }
-  }, [busy, files, workName])
+  }, [busy, files, workName, workspace])
 
   return (
     <div className="bkp">
@@ -82,7 +84,7 @@ export function BackupTab() {
         <div>
           <div className="bkp-title">工程文件校验清单（非完整备份）</div>
           <div className="bkp-desc">
-            生成全工程文件清单报告：逐文件记录字数、大小与 SHA-256 校验值，写入 <code>exports/backups/</code>。
+            为扫描到的工程文本文件生成清单：逐文件记录字数、大小与 SHA-256 校验值，写入 <code>exports/backups/</code>。
             此报告不包含正文副本，不能用于恢复丢失的文件。完整备份请先保存并关闭作品，再将整个作品目录复制到其他磁盘或备份服务。
           </div>
         </div>

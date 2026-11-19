@@ -1,10 +1,10 @@
 /**
  * 作品级全文检索：纯函数核心 + 分批调度。
- * 搜索范围限定 stories/（正文）、concept/（设定）、outline/（大纲）三个作品目录，
+ * 搜索范围限定 stories/（小说正文）或 scenes/（场次）、concept/（设定）、outline/（大纲），
  * 不含 .novel/ 等工程内部目录。千章级工程按批搜索、批间让出主线程，避免 UI 冻结。
  * 文件读取由调用方注入（RPC read_text），本模块保持零 IO 可单测。
  */
-import { isHiddenWorkspaceEntry, isTextDocument } from './documents'
+import { isHiddenWorkspaceEntry, isScenePath, isTextDocument } from './documents'
 
 /** collectScopeFiles 的宽松输入类型（测试可用普通对象模拟 FsEntry） */
 export type FsEntryLike = {
@@ -14,13 +14,15 @@ export type FsEntryLike = {
   children?: FsEntryLike[]
 }
 
-export type SearchScope = 'stories' | 'concept' | 'outline'
+export type SearchScope = 'stories' | 'scenes' | 'concept' | 'outline'
 
 export const SEARCH_SCOPES: Array<{ id: SearchScope; zh: string }> = [
   { id: 'stories', zh: '正文' },
   { id: 'concept', zh: '设定' },
   { id: 'outline', zh: '大纲' },
 ]
+
+export const SCREENPLAY_SEARCH_SCOPES: typeof SEARCH_SCOPES = [{ id: 'scenes', zh: '场次' }, ...SEARCH_SCOPES.slice(1)]
 
 /** 每批搜索的文件数：批间让出主线程 */
 export const SEARCH_BATCH_SIZE = 8
@@ -94,7 +96,8 @@ export function collectScopeFiles(tree: FsEntryLike, scopes: SearchScope[]): str
   const walk = (e: FsEntryLike) => {
     if (isHiddenWorkspaceEntry(e.name)) return
     if (e.kind === 'file') {
-      if (isTextDocument(e.path) && prefixes.some((p) => e.path.startsWith(p))) out.push(e.path)
+      if (e.path.startsWith('scenes/') ? scopes.includes('scenes') && isScenePath(e.path)
+        : isTextDocument(e.path) && prefixes.some((p) => e.path.startsWith(p))) out.push(e.path)
     }
     for (const c of e.children ?? []) walk(c)
   }

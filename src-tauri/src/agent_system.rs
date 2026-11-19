@@ -2,6 +2,8 @@ use crate::ai_types::ChatMessage;
 use crate::app_settings::AiEditApplyMode;
 use crate::commands;
 use crate::prompt_config;
+use crate::services::bookshelf::{project_kind, ProjectKind};
+use crate::services::screenplay;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -182,10 +184,25 @@ pub struct AgentToolEvent {
 pub struct AgentRuntime {
   ctx: ToolContext,
   tools: ToolRegistry,
-  memory: MemoryStore,
+  memory: Option<MemoryStore>,
 }
 
 impl ToolRegistry {
+  fn screenplay_tools() -> Self {
+    let mut tools = ToolRegistry::new();
+    tools.register("screenplay_list_scenes", |ctx, _| {
+      let mut scenes = screenplay::list(&ctx.workspace_root)?;
+      let total = scenes.len();
+      scenes.truncate(200);
+      Ok(serde_json::json!({ "scenes": scenes, "total": total }))
+    });
+    tools.register("fs_read_text", |ctx, args| {
+      let path = args.get("path").and_then(Value::as_str).ok_or("missing args.path")?;
+      screenplay::read_reference(&ctx.workspace_root, path).map(|text| serde_json::json!({ "text": text }))
+    });
+    tools
+  }
+
   /// 内置 AI 的小说特化白名单工具集：仅工作区受限文件工具与小说专用工具，
   /// 不包含命令执行、shell、任意进程、网络访问类工具。
   pub fn default_tools() -> Self {
@@ -401,15 +418,18 @@ impl AgentRuntime {
     let ctx = ToolContext {
       workspace_root: workspace_root.clone(),
     };
-    let memory = MemoryStore::load(&workspace_root);
-    let tools = ToolRegistry::default_tools();
+    let screenplay = project_kind(&workspace_root) == ProjectKind::Screenplay;
+    let memory = (!screenplay).then(|| MemoryStore::load(&workspace_root));
+    let tools = if screenplay { ToolRegistry::screenplay_tools() } else { ToolRegistry::default_tools() };
     Self { ctx, tools, memory }
   }
 
   pub fn tools(&self) -> Vec<String> {
     let mut out = self.tools.list();
-    out.push("memory_upsert".to_string());
-    out.push("memory_search".to_string());
+    if self.memory.is_some() {
+      out.push("memory_upsert".to_string());
+      out.push("memory_search".to_string());
+    }
     out.sort();
     out
   }
@@ -429,7 +449,7 @@ impl AgentRuntime {
   {
     let mut perf = AgentPerf::default();
     let tool_list = self.tools();
-    let memory_text = self.memory.render(50);
+    let memory_text = self.memory.as_ref().map(|memory| memory.render(50)).unwrap_or_default();
     let prompts = prompt_config::agent_prompts();
     // 工程概况注入：让 Agent 开局即知作品名/简介/结构/章数，减少盲目 fs_list_dir
     let work_context = crate::services::bookshelf::render_work_context(&self.ctx.workspace_root);
@@ -439,16 +459,19 @@ impl AgentRuntime {
     };
     let mut messages: Vec<ChatMessage> = Vec::new();
     let tool_list_text = tool_list.join(", ");
-    let react_prompt = prompts
-      .runtime_prompt_template
-      .replace("{{SYS}}", agent_system_prompt.trim())
-      .replace("{{TOOLS}}", tool_list_text.as_str());
+    let react_prompt = if self.memory.is_none() {
+      prompt_config::SCREENPLAY_RUNTIME_PROMPT.to_owned()
+    } else {
+      prompts.runtime_prompt_template
+        .replace("{{SYS}}", agent_system_prompt.trim())
+        .replace("{{TOOLS}}", tool_list_text.as_str())
+    };
     let react_prompt = if work_context.is_empty() {
       react_prompt
     } else {
       format!("{react_prompt}\n\n<work-context>\n{work_context}\n</work-context>")
     };
-    let react_prompt = format!("{react_prompt}\n\n{mode_instruction}");
+    let react_prompt = if self.memory.is_none() { react_prompt } else { format!("{react_prompt}\n\n{mode_instruction}") };
     messages.push(ChatMessage {
       role: "system".to_string(),
       content: if memory_text.is_empty() {
@@ -496,7 +519,7 @@ impl AgentRuntime {
           duration_ms: None,
         });
         let t1 = Instant::now();
-        let result = if call.tool == "memory_upsert" {
+        let result = if let ("memory_upsert", Some(memory)) = (call.tool.as_str(), self.memory.as_mut()) {
           let key = call
             .args
             .get("key")
@@ -510,20 +533,20 @@ impl AgentRuntime {
             .ok_or_else(|| "missing args.value".to_string());
           match (key, value) {
             (Ok(k), Ok(v)) => {
-              self.memory.upsert(k, v);
-              let _ = self.memory.save();
+              memory.upsert(k, v);
+              let _ = memory.save();
               Ok(serde_json::json!({ "ok": true }))
             }
             (Err(e), _) | (_, Err(e)) => Err(e),
           }
-        } else if call.tool == "memory_search" {
+        } else if let ("memory_search", Some(memory)) = (call.tool.as_str(), self.memory.as_ref()) {
           let query = call
             .args
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "missing args.query".to_string())?;
           let limit = call.args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-          let hits = self.memory.search(query, limit);
+          let hits = memory.search(query, limit);
           Ok(serde_json::to_value(hits).unwrap_or_else(|_| serde_json::json!([])))
         } else {
           self.tools.call(&self.ctx, &call.tool, call.args.clone())
@@ -811,6 +834,18 @@ mod tests {
       "novel_write_chapter",
     ];
     assert_eq!(tools, expected);
+  }
+
+  #[test]
+  fn screenplay_runtime_exposes_only_scene_list_and_text_references() {
+    let guard = tempdir::create_temp_dir("iris-screenplay-agent");
+    let root = guard.path().canonicalize().unwrap();
+    screenplay::init(&root).unwrap();
+    let runtime = AgentRuntime::new(root);
+    assert_eq!(runtime.tools(), ["fs_read_text", "screenplay_list_scenes"]);
+    assert!(runtime.tools.call(&runtime.ctx, "fs_write_text", serde_json::json!({})).is_err());
+    assert!(runtime.tools.call(&runtime.ctx, "fs_read_text", serde_json::json!({"path": ".novel/work.json"})).is_err());
+    assert!(runtime.tools.call(&runtime.ctx, "fs_read_text", serde_json::json!({"path": "concept/characters.md"})).is_ok());
   }
 
   #[test]

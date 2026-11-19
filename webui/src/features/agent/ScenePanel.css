@@ -1,0 +1,28 @@
+.scene-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.scene-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px; }
+.scene-panel-head > div, .scene-row-text { display: grid; min-width: 0; gap: 3px; text-align: left; }
+.scene-panel-head small, .scene-row small { color: var(--text-muted); font-size: 11px; }
+.scene-panel-links { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 8px 8px; }
+.scene-list { list-style: none; margin: 0; padding: 0 8px 10px; overflow: auto; }
+.scene-row { display: flex; align-items: center; gap: 4px; padding: 2px 3px; border: 1px solid transparent; border-radius: var(--radius); }
+.scene-row:hover { background: var(--hover); }
+.scene-row.active { border-color: var(--border); background: var(--accent-weak); }
+.scene-row-main { flex: 1; display: flex; align-items: center; gap: 9px; min-width: 0; padding: 8px 5px; }
+.scene-num { font: 12px ui-monospace, monospace; color: var(--accent); }
+.scene-row-text strong, .scene-row-text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scene-row-text strong { font-size: 13px; }
+.scene-order-actions { display: flex; flex-shrink: 0; }
+.scene-notice { padding: 7px 11px; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.scene-notice.error { color: var(--danger); }
+.scene-dialog { width: min(460px, 92vw); max-height: 88vh; overflow: auto; }
+.scene-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding: 0; border: 0; margin: 12px 0 0; min-width: 0; }
+.scene-fields label { display: grid; min-width: 0; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+.scene-fields input, .scene-fields select { width: 100%; min-width: 0; padding: 7px 9px; }
+.scene-wide { grid-column: 1 / -1; }
+.scene-export { display: grid; gap: 10px; max-width: 66ch; }
+.scene-export h3 { font-size: 16px; }
+.scene-export p { font-size: 13px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.scene-export .scene-panel-links { padding: 0; }
+.agw-scene-head { flex-wrap: wrap; }
+.agw-scene-head .agw-file-actions { flex-wrap: wrap; max-width: 100%; }
+.agw-scene-guide { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-muted); }

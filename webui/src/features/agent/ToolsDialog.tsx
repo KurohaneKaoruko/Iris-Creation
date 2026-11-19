@@ -25,6 +25,7 @@ import { PlannerTab } from './PlannerTab'
 import { SearchTab } from './SearchTab'
 import { ExportTab } from './ExportTab'
 import { BackupTab } from './BackupTab'
+import { ScreenplayExport } from './ScenePanel'
 import './ToolsDialog.css'
 import './PlannerTab.css'
 
@@ -44,13 +45,16 @@ const TABS: Array<{ id: ToolsTab; label: string; icon: IconName }> = [
 type Props = {
   open: boolean
   tab: ToolsTab
+  screenplay?: boolean
+  workspaceRoot?: string
+  sceneCount?: number
   onTabChange: (tab: ToolsTab) => void
   onClose: () => void
   onOpenFile: (path: string, location?: SearchLocation) => void
 }
 
 /** 工具中心：全文检索 / 作品统计 / 导出 / 一致性检查 / 正文铁律体检 / 存量导入切章 / 任务队列 */
-export function ToolsDialog({ open, tab, onTabChange, onClose, onOpenFile }: Props) {
+export function ToolsDialog({ open, tab, screenplay = false, workspaceRoot, sceneCount = 0, onTabChange, onClose, onOpenFile }: Props) {
   const [visited, setVisited] = useState<Set<ToolsTab>>(() => new Set())
   const [keepSearch, setKeepSearch] = useState(false)
   const closeRef = useRef<HTMLButtonElement>(null)
@@ -69,7 +73,8 @@ export function ToolsDialog({ open, tab, onTabChange, onClose, onOpenFile }: Pro
     return () => { if (previous?.isConnected && !previous.closest('.tools-dialog')) previous.focus() }
   }, [open])
 
-  const present = (name: ToolsTab) => open && (tab === name || visited.has(name))
+  const tabs = screenplay ? TABS.filter(({ id }) => id === 'search' || id === 'export' || id === 'backup') : TABS
+  const present = (name: ToolsTab) => open && tabs.some(({ id }) => id === name) && (tab === name || visited.has(name))
   return (
     <div className="tools-overlay" hidden={!open} onClick={onClose} onKeyDown={(event) => {
       if (event.defaultPrevented || event.nativeEvent.isComposing) return
@@ -88,7 +93,7 @@ export function ToolsDialog({ open, tab, onTabChange, onClose, onOpenFile }: Pro
       <div className="tools-dialog glass-panel" role="dialog" aria-modal="true" aria-label="工具中心" onClick={(e) => e.stopPropagation()}>
         <div className="tools-head">
           <div className="tools-tabs">
-            {TABS.map((t) => (
+            {tabs.map((t) => (
               <button key={t.id} className={tab === t.id ? 'active' : ''} aria-pressed={tab === t.id} onClick={() => onTabChange(t.id)}>
                 <Icon name={t.icon} size={14} />
                 {t.label}
@@ -98,9 +103,9 @@ export function ToolsDialog({ open, tab, onTabChange, onClose, onOpenFile }: Pro
           <button ref={closeRef} className="tools-x" onClick={onClose} aria-label="关闭工具中心"><Icon name="x" size={16} /></button>
         </div>
         <div className="tools-body">
-          {searchVisible || keepSearch ? <div className="tools-tab-pane" hidden={!searchVisible}><SearchTab onOpenFile={onOpenFile} dialogOpen={open} visible={searchVisible} /></div> : null}
+          {searchVisible || keepSearch ? <div className="tools-tab-pane" hidden={!searchVisible}><SearchTab onOpenFile={onOpenFile} dialogOpen={open} visible={searchVisible} screenplay={screenplay} workspaceRoot={workspaceRoot} /></div> : null}
           {present('stats') ? <div className="tools-tab-pane" hidden={tab !== 'stats'}><StatsTab onOpenFile={onOpenFile} /></div> : null}
-          {present('export') ? <div className="tools-tab-pane" hidden={tab !== 'export'}><ExportTab /></div> : null}
+          {present('export') ? <div className="tools-tab-pane" hidden={tab !== 'export'}>{screenplay && workspaceRoot ? <ScreenplayExport workspace={workspaceRoot} sceneCount={sceneCount} /> : <ExportTab />}</div> : null}
           {present('backup') ? <div className="tools-tab-pane" hidden={tab !== 'backup'}><BackupTab /></div> : null}
           {present('consistency') ? <div className="tools-tab-pane" hidden={tab !== 'consistency'}><ConsistencyTab onOpenFile={onOpenFile} /></div> : null}
           {present('lint') ? <div className="tools-tab-pane" hidden={tab !== 'lint'}><LintTab onOpenFile={onOpenFile} /></div> : null}

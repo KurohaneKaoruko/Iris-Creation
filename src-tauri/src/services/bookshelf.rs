@@ -2,12 +2,23 @@
 
 use crate::app_data;
 use crate::app_settings;
-use super::workspace::{canonicalize_path, init_novel_workspace};
+use super::workspace::{canonicalize_path, init_novel_workspace, managed_dir, replace_file};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+static WORK_META_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectKind {
+  #[default]
+  Novel,
+  Screenplay,
+}
 
 #[derive(Serialize, Clone)]
 pub struct ProjectItem {
@@ -17,7 +28,9 @@ pub struct ProjectItem {
   pub is_valid_workspace: bool,
   pub last_opened_at: Option<i64>,
   pub description: Option<String>,
+  pub kind: ProjectKind,
   pub chapters_count: u32,
+  pub scenes_count: u32,
   pub total_words: u32,
   pub updated_at: Option<i64>,
 }
@@ -109,36 +122,49 @@ fn default_projects_root() -> Result<PathBuf, String> {
 }
 
 fn is_valid_workspace_root(path: &Path) -> bool {
-  path.join("concept").is_dir() || path.join("outline").is_dir() || path.join("stories").is_dir()
+  project_kind(path) == ProjectKind::Screenplay
+    || path.join("concept").is_dir() || path.join("outline").is_dir() || path.join("stories").is_dir()
 }
 
 pub(crate) fn work_meta_path(root: &Path) -> PathBuf {
   root.join(".novel").join("work.json")
 }
 
-fn read_work_description(root: &Path) -> Option<String> {
-  #[derive(Deserialize)]
-  struct WorkMeta {
-    #[serde(default)]
-    description: Option<String>,
-  }
+fn read_work_meta(root: &Path) -> Option<serde_json::Value> {
   let raw = fs::read_to_string(work_meta_path(root)).ok()?;
-  let meta: WorkMeta = serde_json::from_str(&raw).ok()?;
-  meta
-    .description
-    .map(|d| d.trim().to_string())
-    .filter(|d| !d.is_empty())
+  serde_json::from_str(&raw).ok()
+}
+
+fn kind_from_meta(meta: Option<&serde_json::Value>) -> ProjectKind {
+  match meta.and_then(|v| v.get("kind")).and_then(|v| v.as_str()) {
+    Some("screenplay") => ProjectKind::Screenplay,
+    _ => ProjectKind::Novel,
+  }
+}
+
+pub(crate) fn project_kind(root: &Path) -> ProjectKind {
+  kind_from_meta(read_work_meta(root).as_ref())
+}
+
+fn work_description(meta: Option<&serde_json::Value>) -> Option<&str> {
+  meta.and_then(|v| v.get("description")).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn write_work_description(root: &Path, description: Option<String>) -> Result<(), String> {
+  let _guard = WORK_META_WRITE_LOCK.lock().map_err(|_| "work metadata write lock is poisoned")?;
   let meta_path = work_meta_path(root);
-  if let Some(parent) = meta_path.parent() {
-    fs::create_dir_all(parent).map_err(|e| format!("create .novel dir failed: {e}"))?;
-  }
-  let payload = serde_json::json!({ "description": description });
+  managed_dir(root, &[".novel"], true)?;
+  // 不得用只含简介的对象覆盖作品类型或其它未知版本的字段。
+  let mut payload = match fs::read_to_string(&meta_path) {
+    Ok(raw) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
+      .map_err(|e| format!("parse work meta failed (not overwritten): {e}"))?,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+    Err(e) => return Err(format!("read work meta failed: {e}")),
+  };
+  payload.insert("description".into(), serde_json::json!(description));
   let raw = serde_json::to_string_pretty(&payload)
     .map_err(|e| format!("serialize work meta failed: {e}"))?;
-  fs::write(meta_path, raw).map_err(|e| format!("write work meta failed: {e}"))
+  replace_file(&meta_path, raw.as_bytes(), || Ok(()))
 }
 
 /// Mirrors the web app's word-count convention: count non-whitespace
@@ -153,18 +179,25 @@ struct WorkStats {
   updated_at: Option<i64>,
 }
 
-fn scan_work_stats(root: &Path) -> WorkStats {
+fn scan_work_stats(root: &Path, kind: ProjectKind) -> WorkStats {
   let mut stats = WorkStats {
     chapters_count: 0,
     total_words: 0,
     updated_at: None,
   };
-  let Ok(entries) = fs::read_dir(root.join("stories")) else {
+  let directory = match kind { ProjectKind::Novel => root.join("stories"), ProjectKind::Screenplay => root.join("scenes") };
+  if kind == ProjectKind::Screenplay && !fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir()) {
+    return stats;
+  }
+  let Ok(entries) = fs::read_dir(directory) else {
     return stats;
   };
   for entry in entries.flatten() {
     let path = entry.path();
-    if !path.is_file() {
+    if kind == ProjectKind::Screenplay && (!entry.file_type().is_ok_and(|t| t.is_file()) || !super::screenplay::is_scene_file(&path)) {
+      continue;
+    }
+    if kind == ProjectKind::Novel && !path.is_file() {
       continue;
     }
     let ext = path
@@ -199,16 +232,19 @@ fn to_project_item(path: &Path, source: &str, last_opened_at: Option<i64>) -> Pr
     .file_name()
     .map(|v| v.to_string_lossy().to_string())
     .unwrap_or_else(|| path.to_string_lossy().to_string());
-  let description = read_work_description(path);
-  let stats = scan_work_stats(path);
+  let meta = read_work_meta(path);
+  let kind = kind_from_meta(meta.as_ref());
+  let stats = scan_work_stats(path, kind);
   ProjectItem {
     name,
     path: path.to_string_lossy().to_string(),
     source: source.to_string(),
     is_valid_workspace: is_valid_workspace_root(path),
     last_opened_at,
-    description,
-    chapters_count: stats.chapters_count,
+    description: work_description(meta.as_ref()).map(str::to_owned),
+    kind,
+    chapters_count: if kind == ProjectKind::Novel { stats.chapters_count } else { 0 },
+    scenes_count: if kind == ProjectKind::Screenplay { stats.chapters_count } else { 0 },
     total_words: stats.total_words,
     updated_at: stats.updated_at,
   }
@@ -232,7 +268,7 @@ fn list_default_projects(root: &Path) -> Result<Vec<ProjectItem>, String> {
   Ok(projects)
 }
 
-fn sanitize_project_folder_name(input: &str) -> String {
+fn sanitize_project_folder_name(input: &str, kind: ProjectKind) -> String {
   let mut out = String::new();
   for ch in input.trim().chars() {
     let allowed = ch.is_ascii_alphanumeric()
@@ -245,19 +281,24 @@ fn sanitize_project_folder_name(input: &str) -> String {
       out.push('-');
     }
   }
-  let compact = out
+  let compact: String = out
     .split('-')
     .filter(|part| !part.is_empty())
     .collect::<Vec<_>>()
-    .join("-");
+    .join("-").chars().take(72).collect();
+  let upper = compact.to_ascii_uppercase();
+  let windows_device = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+    || (upper.len() == 4 && (upper.starts_with("COM") || upper.starts_with("LPT")) && matches!(upper.as_bytes()[3], b'1'..=b'9'));
   if compact.is_empty() {
-    "novel".to_string()
+    match kind { ProjectKind::Novel => "novel".into(), ProjectKind::Screenplay => "screenplay".into() }
+  } else if windows_device {
+    format!("作品-{compact}")
   } else {
     compact
   }
 }
 
-fn build_unique_project_path(root: &Path, base_name: &str) -> PathBuf {
+fn reserve_project_path(root: &Path, base_name: &str) -> Result<PathBuf, String> {
   let mut idx = 1usize;
   loop {
     let candidate = if idx == 1 {
@@ -265,10 +306,11 @@ fn build_unique_project_path(root: &Path, base_name: &str) -> PathBuf {
     } else {
       root.join(format!("{base_name}-{idx:02}"))
     };
-    if !candidate.exists() {
-      return candidate;
+    match fs::create_dir(&candidate) {
+      Ok(()) => return Ok(candidate),
+      Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => idx += 1,
+      Err(e) => return Err(format!("create project dir failed: {e}")),
     }
-    idx += 1;
   }
 }
 
@@ -333,19 +375,27 @@ pub fn get_project_picker_state() -> Result<ProjectPickerState, String> {
 }
 
 pub fn create_novel_project(name: &str, description: Option<String>) -> Result<ProjectItem, String> {
+  create_project(name, description, ProjectKind::Novel)
+}
+
+pub fn create_project(name: &str, description: Option<String>, kind: ProjectKind) -> Result<ProjectItem, String> {
+  create_project_in(&default_projects_root()?, name, description, kind)
+}
+
+fn create_project_in(default_root: &Path, name: &str, description: Option<String>, kind: ProjectKind) -> Result<ProjectItem, String> {
   let trimmed = name.trim();
   if trimmed.is_empty() {
     return Err("project name is empty".to_string());
   }
 
-  let default_root = default_projects_root()?;
-  fs::create_dir_all(&default_root).map_err(|e| format!("create default projects root failed: {e}"))?;
+  fs::create_dir_all(default_root).map_err(|e| format!("create default projects root failed: {e}"))?;
 
-  let folder_name = sanitize_project_folder_name(trimmed);
-  let target_root = build_unique_project_path(&default_root, &folder_name);
-  fs::create_dir_all(&target_root).map_err(|e| format!("create project dir failed: {e}"))?;
-
-  init_novel_workspace(&target_root)?;
+  let folder_name = sanitize_project_folder_name(trimmed, kind);
+  let target_root = reserve_project_path(default_root, &folder_name)?;
+  match kind {
+    ProjectKind::Novel => init_novel_workspace(&target_root)?,
+    ProjectKind::Screenplay => super::screenplay::init(&target_root)?,
+  }
 
   let clean_description = description
     .map(|d| d.trim().to_string())
@@ -435,9 +485,14 @@ pub fn render_work_context(root: &std::path::Path) -> String {
     .file_name()
     .map(|v| v.to_string_lossy().to_string())
     .unwrap_or_else(|| root.to_string_lossy().to_string());
+  let meta = read_work_meta(root);
+  let kind = kind_from_meta(meta.as_ref());
   let mut lines = vec![format!("当前作品：{}", name)];
+  if kind == ProjectKind::Screenplay {
+    lines.push("作品类型：剧本。scenes/ 存放逐场剧本，concept/ 存放人物资料，outline/ 存放分场大纲。".into());
+  }
 
-  if let Some(desc) = read_work_description(root) {
+  if let Some(desc) = work_description(meta.as_ref()) {
     lines.push(format!("作品简介：{}", desc));
   }
 
@@ -474,24 +529,48 @@ pub fn render_work_context(root: &std::path::Path) -> String {
   list_children(root, 0, &mut tree, "");
 
   // 章节统计
-  let stats = scan_work_stats(root);
+  let stats = scan_work_stats(root, kind);
   if stats.chapters_count > 0 {
     lines.push(format!(
-      "正文：{} 章，约 {} 字",
+      "正文：{} {}，约 {} 字",
       stats.chapters_count,
+      if kind == ProjectKind::Screenplay { "场" } else { "章" },
       stats.total_words
     ));
   }
 
   lines.push("目录结构：".to_string());
   lines.extend(tree.iter().map(|l| format!("  {l}")));
-  lines.push("以上为只读概况；写文件前仍应先用 fs_read_text 核对相关文件。".to_string());
+  if kind == ProjectKind::Novel {
+    lines.push("以上为只读概况；写文件前仍应先用 fs_read_text 核对相关文件。".to_string());
+  }
   lines.join("\n")
 }
 
 #[cfg(test)]
 mod work_context_tests {
   use super::*;
+
+  #[test]
+  fn mixed_bookshelf_keeps_legacy_novels_and_screenplay_metadata_separate() {
+    let root = std::env::temp_dir().join(format!("iris-mixed-work-{}", uuid::Uuid::new_v4()));
+    let novel = create_project_in(&root, "同名作品", None, ProjectKind::Novel).unwrap();
+    let script = create_project_in(&root, "同名作品", Some("原简介".into()), ProjectKind::Screenplay).unwrap();
+    assert_ne!(novel.path, script.path);
+    assert_eq!((novel.kind, novel.chapters_count, novel.scenes_count), (ProjectKind::Novel, 1, 0));
+    assert_eq!((script.kind, script.chapters_count, script.scenes_count), (ProjectKind::Screenplay, 0, 1));
+    let script_path = Path::new(&script.path);
+    let meta = work_meta_path(script_path);
+    fs::write(&meta, r#"{"kind":"screenplay","future_field":{"version":2}}"#).unwrap();
+    update_work_description(&script.path, Some("新简介".into())).unwrap();
+    let saved = read_work_meta(script_path).unwrap();
+    assert_eq!(saved["kind"], "screenplay");
+    assert_eq!(saved["description"], "新简介");
+    assert_eq!(saved["future_field"]["version"], 2);
+    assert!(!script_path.join("stories").exists());
+    assert_eq!(list_default_projects(&root).unwrap().len(), 2);
+    fs::remove_dir_all(root).unwrap();
+  }
 
   #[test]
   fn render_work_context_lists_structure_and_stats() {

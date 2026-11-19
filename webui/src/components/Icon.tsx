@@ -27,6 +27,7 @@ export type IconName =
   | 'pencil'
   | 'pen-line'
   | 'book-open'
+  | 'clapperboard'
   | 'search'
   | 'trash'
   | 'wrench'
@@ -110,6 +111,7 @@ const PATHS: Record<IconName, JSX.Element> = {
   pencil: <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Zm-2 5 4 4" />,
   'pen-line': <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />,
   'book-open': <path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" />,
+  clapperboard: <path d="m14 4 3 4M7 5l3 5m11-3-18 4V8a2 2 0 0 1 1.5-2l14-3A2 2 0 0 1 21 4.5ZM3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
   search: (
     <>
       <circle cx="11" cy="11" r="8" />

@@ -9,14 +9,15 @@ type FileTreeProps = {
   activePath: string | null
   onOpen: (path: string) => void
   onRename: (path: string) => void
+  canManage?: (path: string) => boolean
   onDelete: (path: string) => void
   /** 点击回复/树中的文件路径（用于面板跳转） */
   onJumpFile?: (path: string) => void
 }
 
 /** 递归文件树：目录可折叠；文件 hover 显示操作；仅 Markdown/文本可打开 */
-export function FileTree({ entry, activePath, onOpen, onRename, onDelete }: FileTreeProps) {
-  return <NodeView entry={entry} depth={0} activePath={activePath} onOpen={onOpen} onRename={onRename} onDelete={onDelete} />
+export function FileTree({ entry, activePath, onOpen, onRename, canManage, onDelete }: FileTreeProps) {
+  return <NodeView entry={entry} depth={0} activePath={activePath} onOpen={onOpen} onRename={onRename} canManage={canManage} onDelete={onDelete} />
 }
 
 function NodeView({
@@ -25,6 +26,7 @@ function NodeView({
   activePath,
   onOpen,
   onRename,
+  canManage,
   onDelete,
 }: FileTreeProps & { depth: number }) {
   const [open, setOpen] = useState(depth < 2)
@@ -63,10 +65,10 @@ function NodeView({
           title={openable ? entry.path : '非文本文件，不可预览'}
         >
           <span className="ft-name">{entry.name}</span>
-          <span className="ft-actions">
+          {(!canManage || canManage(entry.path)) ? <span className="ft-actions">
             <button title="重命名" onClick={(e) => stop(e, () => onRename(entry.path))}><Icon name="pencil" size={13} /></button>
             <button title="删除" onClick={(e) => stop(e, () => onDelete(entry.path))}><Icon name="trash" size={13} /></button>
-          </span>
+          </span> : null}
         </div>
       )}
       {isDir && open
@@ -78,6 +80,7 @@ function NodeView({
               activePath={activePath}
               onOpen={onOpen}
               onRename={onRename}
+              canManage={canManage}
               onDelete={onDelete}
             />
           ))

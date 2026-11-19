@@ -12,6 +12,8 @@ export function isTextDocument(path: string): boolean {
   return /\.(md|markdown|txt)$/i.test(path)
 }
 
+export const isScenePath = (path: string | null) => !!path && /^scenes\/[^./\\:][^/\\:]*\.(?:md|markdown)$/i.test(path)
+
 export function collectDocuments(tree: FsEntry | null): DocumentFile[] {
   const result: DocumentFile[] = []
   function walk(entry: FsEntry) {

@@ -187,9 +187,10 @@ pub(crate) fn validate_outline(existing_json: &str, new_json: &str) -> Result<()
     Err(conflicts.join("\n"))
   }
 }
+use super::bookshelf::{project_kind, ProjectKind};
 use super::workspace::{
   create_history_snapshot_internal, get_workspace_root, should_track_history_path,
-  validate_relative_path,
+  scoped_workspace, validate_relative_path,
 };
 use crate::state::AppState;
 use std::collections::HashSet;
@@ -486,13 +487,22 @@ pub fn validate_novel_task_quality(
 
 // ---- 由 commands.rs 等价搬移（文件操作）----
 pub fn list_workspace_tree(state: &AppState, max_depth: usize) -> Result<FsEntry, String> {
-  let root = get_workspace_root(state)?;
+  list_workspace_tree_scoped(state, max_depth, None)
+}
+
+pub(crate) fn list_workspace_tree_scoped(state: &AppState, max_depth: usize, workspace: Option<&str>) -> Result<FsEntry, String> {
+  let root = scoped_workspace(state, workspace)?;
   build_tree(&root, &root, max_depth)
 }
 
 pub fn read_text(state: &AppState, relative_path: &str) -> Result<String, String> {
-  let root = get_workspace_root(state)?;
-  let rel = validate_relative_path(&relative_path)?;
+  read_text_scoped(state, relative_path, None)
+}
+
+pub(crate) fn read_text_scoped(state: &AppState, relative_path: &str, workspace: Option<&str>) -> Result<String, String> {
+  let root = scoped_workspace(state, workspace)?;
+  let rel = validate_relative_path(relative_path)?;
+  super::screenplay::check_manuscript_path(&root, &rel)?;
   let target = root.join(rel);
   fs::read_to_string(target).map_err(|e| format!("read failed: {e}"))
 }
@@ -505,6 +515,10 @@ pub fn export_work(state: &AppState, format: &str) -> Result<(String, String), S
     .file_name()
     .map(|s| s.to_string_lossy().to_string())
     .unwrap_or_else(|| "work".to_string());
+  if project_kind(&root) == ProjectKind::Screenplay {
+    let content = super::screenplay::export(&root, &work_name, format)?;
+    return Ok((format!("{}-剧本.{format}", sanitize_filename(&work_name)), content));
+  }
 
   // 章节元数据（可选）
   let meta: serde_json::Value =
@@ -656,6 +670,32 @@ mod export_tests {
     assert_eq!(std::fs::read_to_string(path).unwrap(), "saved edit");
     std::fs::remove_dir_all(root).unwrap();
   }
+
+  #[test]
+  fn failed_history_and_readonly_save_keep_original_manuscript() {
+    let root = std::env::temp_dir().join(format!("iris-failed-save-{}", uuid::Uuid::new_v4()));
+    let history = root.join(".novel/.history");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::create_dir_all(root.join("scenes")).unwrap();
+    std::fs::write(root.join(".novel/work.json"), r#"{"kind":"screenplay"}"#).unwrap();
+    let path = root.join("scenes/opening.md");
+    std::fs::write(&path, "original").unwrap();
+    let index = history.join("revisions.json");
+    std::fs::write(&index, "damaged index").unwrap();
+    let save = || write_text_internal_with_baseline(&root, "scenes/opening.md", "new", false, "auto-save", Some("original"));
+    assert!(save().unwrap_err().contains("历史快照"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    assert_eq!(std::fs::read_to_string(&index).unwrap(), "damaged index");
+    std::fs::write(&index, r#"{"entries":[]}"#).unwrap();
+    let original_permissions = std::fs::metadata(&path).unwrap().permissions();
+    let mut readonly = original_permissions.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&path, readonly).unwrap();
+    assert!(save().unwrap_err().contains("未覆盖"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    std::fs::set_permissions(&path, original_permissions).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+  }
 }
 
 pub fn write_text(
@@ -673,7 +713,17 @@ pub fn write_text_with_baseline(
   content: &str,
   expected_current: Option<&str>,
 ) -> Result<(), String> {
-  let root = get_workspace_root(state)?;
+  write_text_scoped(state, relative_path, content, expected_current, None)
+}
+
+pub(crate) fn write_text_scoped(
+  state: &AppState,
+  relative_path: &str,
+  content: &str,
+  expected_current: Option<&str>,
+  workspace: Option<&str>,
+) -> Result<(), String> {
+  let root = scoped_workspace(state, workspace)?;
   write_text_internal_with_baseline(&root, relative_path, content, false, "auto-save", expected_current)
 }
 
@@ -687,7 +737,7 @@ pub(crate) fn write_text_internal(
   write_text_internal_with_baseline(root, relative_path, content, create_parent_dirs, history_reason, None)
 }
 
-fn write_text_internal_with_baseline(
+pub(crate) fn write_text_internal_with_baseline(
   root: &Path,
   relative_path: &str,
   content: &str,
@@ -697,10 +747,12 @@ fn write_text_internal_with_baseline(
 ) -> Result<(), String> {
   let _write_guard = TEXT_WRITE_LOCK.lock().map_err(|_| "file write lock is poisoned".to_string())?;
   let rel = validate_relative_path(relative_path)?;
+  let screenplay_scene = super::screenplay::check_manuscript_path(root, &rel)?;
+  let rel_norm = rel.to_string_lossy().replace('\\', "/");
   let target = root.join(rel);
-  let rel_norm = relative_path.replace('\\', "/");
+  let atomic = screenplay_scene || expected_current.is_some() || history_reason == "restore-backup";
 
-  if let Some(expected) = expected_current {
+  let check_current = |expected: &str| -> Result<(), String> {
     let current = fs::read_to_string(&target).map_err(|e| {
       if e.kind() == std::io::ErrorKind::NotFound {
         "file changed on disk; file was removed before saving".to_string()
@@ -709,6 +761,10 @@ fn write_text_internal_with_baseline(
     if current != expected {
       return Err("file changed on disk; reload before saving or explicitly overwrite".to_string());
     }
+    Ok(())
+  };
+  if let Some(expected) = expected_current {
+    check_current(expected)?;
   }
 
   if rel_norm == ".novel/.cache/outline.json" {
@@ -728,14 +784,32 @@ fn write_text_internal_with_baseline(
     }
   }
 
-  if target.exists() && should_track_history_path(&rel_norm) {
-    if let Ok(previous_content) = fs::read_to_string(&target) {
-      if previous_content != content {
-        let _ = create_history_snapshot_internal(root, &rel_norm, &previous_content, history_reason);
+  let mut previous = None;
+  if should_track_history_path(&rel_norm) {
+    match expected_current.map_or_else(|| fs::read_to_string(&target), |text| Ok(text.to_owned())) {
+      Ok(text) => {
+        if text != content {
+          let snapshot = create_history_snapshot_internal(root, &rel_norm, &text, history_reason);
+          if atomic {
+            snapshot.map_err(|e| format!("无法保存历史快照；原文件未更改：{e}"))?;
+          }
+        }
+        previous = Some(text);
       }
+      Err(e) if atomic && e.kind() != std::io::ErrorKind::NotFound => {
+        return Err(format!("无法读取旧文件以建立快照；原文件未更改：{e}"));
+      }
+      Err(_) => {},
     }
   }
-  fs::write(&target, content).map_err(|e| format!("write failed: {e}"))?;
+  if atomic {
+    super::workspace::replace_file(&target, content.as_bytes(), || {
+      if let Some(expected) = expected_current.or(previous.as_deref()) { check_current(expected)?; }
+      Ok(())
+    })?;
+  } else {
+    fs::write(&target, content).map_err(|e| format!("write failed: {e}"))?;
+  }
 
   if rel_norm.starts_with("concept/") && rel_norm.to_lowercase().ends_with(".md") {
     update_concept_index(root, &rel_norm, content)?;
@@ -745,33 +819,54 @@ fn write_text_internal_with_baseline(
 }
 
 pub fn create_file(state: &AppState, relative_path: &str) -> Result<(), String> {
-  let root = get_workspace_root(state)?;
+  create_file_scoped(state, relative_path, None)
+}
+
+pub(crate) fn create_file_scoped(state: &AppState, relative_path: &str, workspace: Option<&str>) -> Result<(), String> {
+  let root = scoped_workspace(state, workspace)?;
   let rel = validate_relative_path(&relative_path)?;
+  super::screenplay::check_manuscript_path(&root, &rel)?;
   let target = root.join(rel);
   if let Some(parent) = target.parent() {
     if !parent.exists() {
       return Err("parent directory does not exist; create it first".to_string());
     }
   }
-  fs::write(target, "").map_err(|e| format!("create file failed: {e}"))
+  fs::OpenOptions::new().write(true).create_new(true).open(target)
+    .map(|_| ()).map_err(|e| format!("create file failed: {e}"))
 }
 
 pub fn create_dir(state: &AppState, relative_path: &str) -> Result<(), String> {
+  create_dir_scoped(state, relative_path, None)
+}
+
+pub(crate) fn create_dir_scoped(state: &AppState, relative_path: &str, workspace: Option<&str>) -> Result<(), String> {
   if relative_path.trim().is_empty() {
     return Err("empty path is not allowed".to_string());
   }
-  let root = get_workspace_root(state)?;
+  let root = scoped_workspace(state, workspace)?;
   let rel = validate_relative_path(&relative_path)?;
+  if super::screenplay::in_scene_directory(&rel) && rel.components().count() > 1 && project_kind(&root) == ProjectKind::Screenplay {
+    return Err("场次目录不支持子目录。".into());
+  }
   let target = root.join(rel);
   fs::create_dir_all(target).map_err(|e| format!("create dir failed: {e}"))
 }
 
 pub fn delete_entry(state: &AppState, relative_path: &str) -> Result<(), String> {
+  delete_entry_scoped(state, relative_path, None)
+}
+
+pub(crate) fn delete_entry_scoped(state: &AppState, relative_path: &str, workspace: Option<&str>) -> Result<(), String> {
   if relative_path.trim().is_empty() {
     return Err("empty path is not allowed".to_string());
   }
-  let root = get_workspace_root(state)?;
+  let root = scoped_workspace(state, workspace)?;
   let rel = validate_relative_path(&relative_path)?;
+  if rel.as_os_str().is_empty() { return Err("不能删除作品根目录。".into()); }
+  if super::screenplay::in_scene_directory(&rel) && project_kind(&root) == ProjectKind::Screenplay {
+    return Err("应用不直接删除场次。关闭作品并备份后，可将多余场次移出 scenes/。".into());
+  }
   let target = root.join(rel);
   let md = fs::metadata(&target).map_err(|e| format!("stat failed: {e}"))?;
   if md.is_dir() {
@@ -782,14 +877,28 @@ pub fn delete_entry(state: &AppState, relative_path: &str) -> Result<(), String>
 }
 
 pub fn rename_entry(state: &AppState, from_relative_path: &str, to_relative_path: &str) -> Result<(), String> {
+  rename_entry_scoped(state, from_relative_path, to_relative_path, None)
+}
+
+pub(crate) fn rename_entry_scoped(state: &AppState, from_relative_path: &str, to_relative_path: &str, workspace: Option<&str>) -> Result<(), String> {
   if from_relative_path.trim().is_empty() || to_relative_path.trim().is_empty() {
     return Err("empty path is not allowed".to_string());
   }
-  let root = get_workspace_root(state)?;
+  let root = scoped_workspace(state, workspace)?;
   let from_rel = validate_relative_path(&from_relative_path)?;
   let to_rel = validate_relative_path(&to_relative_path)?;
+  if from_rel.as_os_str().is_empty() || to_rel.as_os_str().is_empty() { return Err("不能重命名作品根目录。".into()); }
+  if (super::screenplay::in_scene_directory(&from_rel) || super::screenplay::in_scene_directory(&to_rel)) && project_kind(&root) == ProjectKind::Screenplay {
+    return Err("请编辑场次的首行标题；原文件名用于关联场次与素材。".into());
+  }
   let from = root.join(from_rel);
   let to = root.join(to_rel);
+  if let Ok(meta) = fs::symlink_metadata(&to) {
+    // A case-only rename on a case-insensitive file system may refer to the source itself.
+    if meta.file_type().is_symlink() || fs::canonicalize(&from).ok() != fs::canonicalize(&to).ok() {
+      return Err("目标路径已存在，未覆盖。".into());
+    }
+  }
   if let Some(parent) = to.parent() {
     fs::create_dir_all(parent).map_err(|e| format!("create dir failed: {e}"))?;
   }
@@ -830,6 +939,7 @@ fn build_tree(root: &Path, path: &Path, max_depth: usize) -> Result<FsEntry, Str
     let mut children: Vec<FsEntry> = vec![];
     for entry in fs::read_dir(path).map_err(|e| format!("read dir failed: {e}"))? {
       let entry = entry.map_err(|e| format!("read dir entry failed: {e}"))?;
+      if !entry.file_type().is_ok_and(|kind| kind.is_file() || kind.is_dir()) { continue; }
       let child_path = entry.path();
       let child = build_tree(root, &child_path, max_depth - 1)?;
       children.push(child);

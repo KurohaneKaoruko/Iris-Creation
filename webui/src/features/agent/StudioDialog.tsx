@@ -12,14 +12,17 @@ import {
   type StudioHandle,
   type StyleFingerprint,
 } from '../../api/studio'
-import { getAppSettings, createDir, writeText } from '../../api/backend'
+import { getAppSettings, createDir, writeText, type ProjectKind } from '../../api/backend'
 import { chapterBodyFromResult, createChapterWithContent } from '../../api/novel'
+import { createScene, SCREENPLAY_TOOLS, splitSceneDraft } from '../../api/screenplay'
 import { loadStyleFingerprint, saveStyleFingerprint } from '../../api/stylefp'
 import { MarkdownView } from './MarkdownView'
 import { Icon, type IconName } from '../../components/Icon'
 import './StudioDialog.css'
 
 type Props = {
+  workKind?: ProjectKind
+  workspaceRoot?: string
   initialToolId?: string
   /** 打开时预填输入框（编辑器选中文字直达润改） */
   initialText?: string
@@ -34,19 +37,22 @@ type Props = {
   /** 用结果替换编辑器原选区（润改闭环） */
   onReplaceSelection?: (text: string) => void
   onClose: () => void
+  onOpenSavedScene?: (path: string) => void
 }
 
-type RunState = 'idle' | 'running' | 'done' | 'error'
+type RunState = 'idle' | 'running' | 'done' | 'error' | 'stopped'
 
 /** 与 studio.ts VARIANT_ANGLES 对齐的短标签（选稿卡片用） */
 const VARIANT_ANGLE_LABELS = ['悬疑冷峻', '细腻心理', '快节奏冲突', '感官画面']
 
 /** 创作工坊：一站式 AI 文本创作工具集（构思 / 写作 / 润改 / 实用） */
-export function StudioDialog({ initialToolId, initialText, activePath, activeContent, onInsertToEditor, canReplaceSelection, onReplaceSelection, onClose }: Props) {
-  const [toolId, setToolId] = useState(initialToolId ?? STUDIO_TOOLS[0].id)
+export function StudioDialog({ workKind, workspaceRoot, initialToolId, initialText, activePath, activeContent, onInsertToEditor, canReplaceSelection, onReplaceSelection, onClose, onOpenSavedScene }: Props) {
+  const screenplay = workKind === 'screenplay'
+  const catalog = screenplay ? SCREENPLAY_TOOLS : STUDIO_TOOLS
+  const [toolId, setToolId] = useState(() => catalog.find((candidate) => candidate.id === initialToolId)?.id ?? catalog[0].id)
   const tool = useMemo(
-    () => STUDIO_TOOLS.find((t) => t.id === toolId) ?? STUDIO_TOOLS[0],
-    [toolId],
+    () => catalog.find((t) => t.id === toolId) ?? catalog[0],
+    [catalog, toolId],
   )
 
   const [instruction, setInstruction] = useState('')
@@ -63,6 +69,11 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
   const handleRef = useRef<StudioHandle | null>(null)
   const variantHandlesRef = useRef<StudioHandle[]>([])
   const resultBodyRef = useRef<HTMLDivElement | null>(null)
+  const generation = useRef(0)
+  const savingRef = useRef(false)
+  const [savingResult, setSavingResult] = useState(false)
+  const [savedFile, setSavedFile] = useState('')
+  const [saveError, setSaveError] = useState('')
 
   // 多稿对照
   const [multiMode, setMultiMode] = useState(false)
@@ -77,15 +88,15 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
   const fpHandleRef = useRef<StudioHandle | null>(null)
 
   useEffect(() => {
-    void loadStyleFingerprint().then(setStyleFp)
-  }, [])
+    if (!screenplay) void loadStyleFingerprint().then(setStyleFp)
+  }, [screenplay])
 
   useEffect(() => {
     void getAppSettings()
       .then((s) => {
         const ps = s.providers ?? []
         setProviders(ps.map((p) => ({ id: p.id, name: p.name || p.id })))
-        if (ps.length > 0) setProviderId((v) => v || ps[0].id)
+        if (ps.length > 0) setProviderId((v) => v || (ps.find((p) => p.id === s.active_provider_id) ?? ps[0]).id)
       })
       .catch(() => {})
   }, [])
@@ -96,8 +107,12 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
     setRunState('idle')
     setResult('')
     setErrMsg('')
+    setSaveError('')
+    setSavedFile('')
     setVariants([])
     setPickedVariant(null)
+    setSaveChapterOpen(false)
+    setChapterSaved(null)
   }, [])
 
   const onToken = useCallback((full: string) => {
@@ -107,9 +122,15 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
   }, [])
 
   const run = useCallback(() => {
-    if (!inputText.trim() || runState === 'running') return
+    if (!inputText.trim() || runState === 'running' || savingRef.current) return
+    const request = ++generation.current
+    const current = () => generation.current === request
     setRunState('running')
     setErrMsg('')
+    setSaveError('')
+    setSavedFile('')
+    setSaveChapterOpen(false)
+    setChapterSaved(null)
     const input = {
       text: inputText,
       instruction,
@@ -119,7 +140,7 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
     }
     const pid = providerId || null
 
-    if (multiMode) {
+    if (multiMode && !screenplay) {
       // 多稿：清空旧稿，逐稿流式更新
       setVariants(new Array(variantCount).fill(null).map(() => ({ text: '', done: false })))
       setPickedVariant(null)
@@ -131,6 +152,7 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
         providerId: pid,
         handlesOut: variantHandlesRef.current,
         onVariant: (i, text, done) => {
+          if (!current()) return
           setVariants((vs) => {
             const next = [...vs]
             next[i] = { text, done }
@@ -143,6 +165,7 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
         },
       })
         .then((results) => {
+          if (!current()) return
           setVariants(results.map((text) => ({ text, done: true })))
           // 自动选中第一份成功稿
           const firstOk = results.findIndex((r) => r.trim())
@@ -151,6 +174,7 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
           setRunState('done')
         })
         .catch((e) => {
+          if (!current()) return
           setErrMsg(e instanceof Error ? e.message : String(e))
           setRunState('error')
         })
@@ -160,17 +184,19 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
     setResult('')
     setPickedVariant(null)
     setVariants([])
-    handleRef.current = runStudioTool({ tool, input, providerId: pid, onToken })
+    handleRef.current = runStudioTool({ tool, input, providerId: pid, onToken: (text) => { if (current()) onToken(text) } })
     handleRef.current.promise
       .then((out) => {
+        if (!current()) return
         setResult(out)
         setRunState('done')
       })
       .catch((e) => {
+        if (!current()) return
         setErrMsg(e instanceof Error ? e.message : String(e))
         setRunState('error')
       })
-  }, [inputText, runState, tool, instruction, style, targetWords, providerId, onToken, multiMode, variantCount, styleFp])
+  }, [inputText, runState, tool, instruction, style, targetWords, providerId, onToken, multiMode, variantCount, styleFp, screenplay])
 
   /** 多稿模式选稿：选中稿进入主结果区（复制/存盘/插入都作用于它） */
   const pickVariant = useCallback((i: number) => {
@@ -182,10 +208,17 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
   }, [])
 
   const cancel = useCallback(() => {
+    generation.current += 1
+    handleRef.current?.cancel()
+    for (const h of variantHandlesRef.current) h.cancel()
+    setRunState('stopped')
+  }, [])
+
+  useEffect(() => () => {
+    generation.current += 1
     handleRef.current?.cancel()
     for (const h of variantHandlesRef.current) h.cancel()
     fpHandleRef.current?.cancel()
-    setRunState('idle')
   }, [])
 
   /** 风格学习：从输入框范文提取文风指纹（覆盖旧指纹） */
@@ -215,38 +248,35 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
       })
   }, [inputText, fpLearning, providerId])
 
-  // Esc 关闭
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  const close = () => { if (!savingRef.current) onClose() }
 
   const copyResult = useCallback(() => {
     void navigator.clipboard.writeText(result).catch(() => {})
   }, [result])
 
   const saveAsFile = useCallback(async () => {
-    if (!result.trim()) return
+    if (!result.trim() || savingRef.current) return
+    savingRef.current = true
+    setSavingResult(true)
+    setSaveError('')
     const name = `studio/${tool.id}-${Date.now()}.md`
     try {
-      // 确保目录存在（首存时 studio/ 尚不存在）
-      try {
-        await createDir('studio')
-      } catch { /* 已存在 */ }
+      // 幂等建立目录，真正的权限错误应提示给作者。
+      await createDir('studio', workspaceRoot)
       await writeText(name, studioResultToMarkdown(tool, {
         text: inputText,
         instruction,
         style,
         targetWords: targetWords ? Number(targetWords) : undefined,
-      }, result))
+      }, result), workspaceRoot)
+      setSavedFile(name)
     } catch (e) {
-      setErrMsg(`保存失败：${e instanceof Error ? e.message : String(e)}`)
-      setRunState('error')
+      setSaveError(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      savingRef.current = false
+      setSavingResult(false)
     }
-  }, [result, tool, inputText, instruction, style, targetWords])
+  }, [result, tool, inputText, instruction, style, targetWords, workspaceRoot])
 
   const insertToEditor = useCallback(() => {
     if (!result.trim() || !activePath) return
@@ -268,46 +298,72 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
 
   const openSaveChapter = useCallback(() => {
     // 预填：AI 产出的首行 `# 标题`（chapterBodyFromResult 剥除后不会重复出现在正文）
-    const { title } = chapterBodyFromResult(result)
+    const { title } = screenplay ? splitSceneDraft(result) : chapterBodyFromResult(result)
     setChapterTitle(title)
     setSaveChapterOpen(true)
     setChapterSaved(null)
-  }, [result])
+  }, [result, screenplay])
 
   const saveAsChapter = useCallback(async () => {
-    const { body } = chapterBodyFromResult(result)
+    if (savingRef.current) return
+    savingRef.current = true
+    setSavingResult(true)
+    setSaveError('')
+    const { body } = screenplay ? splitSceneDraft(result) : chapterBodyFromResult(result)
     try {
-      const path = await createChapterWithContent(chapterTitle, body)
+      let path: string
+      if (screenplay) {
+        if (!workspaceRoot) throw new Error('请先打开剧本作品。')
+        path = (await createScene(workspaceRoot, { title: chapterTitle, body })).path
+      } else {
+        path = await createChapterWithContent(chapterTitle, body)
+      }
       setChapterSaved(path)
     } catch (e) {
-      setErrMsg(`存为章节失败：${e instanceof Error ? e.message : String(e)}`)
-      setRunState('error')
+      setSaveError(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      savingRef.current = false
+      setSavingResult(false)
     }
-  }, [chapterTitle, result])
+  }, [chapterTitle, result, screenplay, workspaceRoot])
 
   const running = runState === 'running'
   const hasResult = result.trim().length > 0
+  const canApply = hasResult && runState === 'done' && !savingResult
+  const isReview = tool.id === 'script-review'
 
   return (
-    <div className="studio-overlay" onClick={onClose}>
-      <div className="studio-dialog" onClick={(e) => e.stopPropagation()}>
+    <div className="studio-overlay" onClick={close}>
+      <div className="studio-dialog" role="dialog" aria-modal="true" aria-label={screenplay ? '剧本工坊' : '创作工坊'} onClick={(e) => e.stopPropagation()} onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return
+        if (event.key === 'Escape') { event.stopPropagation(); close() }
+        if (event.key === 'Tab') {
+          const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button, textarea, input, select')].filter((item) => !item.matches(':disabled'))
+          if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) {
+            event.preventDefault()
+            ;(event.shiftKey ? controls.at(-1) : controls[0])?.focus()
+          }
+        }
+      }}>
         <div className="studio-head">
           <div className="studio-title">
             <Icon name="sparkles" size={15} />
-            创作工坊
+            {screenplay ? '剧本工坊' : '创作工坊'}
           </div>
-          <button className="studio-x" onClick={onClose} title="关闭"><Icon name="x" size={16} /></button>
+          <button className="studio-x" onClick={close} disabled={savingResult} aria-label="关闭工坊"><Icon name="x" size={16} /></button>
         </div>
 
         <div className="studio-layout">
           <nav className="studio-nav">
-            {STUDIO_CATEGORIES.map((cat) => (
+            {STUDIO_CATEGORIES.filter((cat) => catalog.some((item) => item.category === cat)).map((cat) => (
               <div key={cat}>
                 <div className="studio-cat">{cat}</div>
-                {STUDIO_TOOLS.filter((t) => t.category === cat).map((t) => (
+                {catalog.filter((t) => t.category === cat).map((t) => (
                   <button
                     key={t.id}
                     className={`studio-navitem${toolId === t.id ? ' active' : ''}`}
+                    disabled={running || savingResult}
+                    aria-pressed={toolId === t.id}
                     onClick={() => switchTool(t.id)}
                   >
                     <Icon name={t.icon as IconName} size={14} />
@@ -327,10 +383,13 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
             <div className="studio-fields">
               <textarea
                 className="studio-input"
+                aria-label="创作输入"
                 value={inputText}
+                disabled={running || savingResult}
                 onChange={(e) => setInputText(e.target.value)}
                 placeholder={tool.placeholder}
                 spellCheck={false}
+                autoFocus
               />
               <div className="studio-fieldrow">
                 <label className="studio-field">
@@ -339,6 +398,7 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
                     className="studio-input"
                     style={{ minHeight: 0 }}
                     value={instruction}
+                    disabled={running || savingResult}
                     onChange={(e) => setInstruction(e.target.value)}
                     placeholder="例如：第一人称 / 避免成语 / 面向青少年读者"
                     spellCheck={false}
@@ -346,7 +406,7 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
                 </label>
                 <label className="studio-field" style={{ maxWidth: 150 }}>
                   <span className="studio-label">模型</span>
-                  <select className="studio-select" value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+                  <select className="studio-select" value={providerId} disabled={running || savingResult} onChange={(e) => setProviderId(e.target.value)}>
                     {providers.length === 0 ? <option value="">默认 Provider</option> : null}
                     {providers.map((p) => (
                       <option key={p.id} value={p.id}>{p.name}</option>
@@ -355,7 +415,7 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
                 </label>
               </div>
               <div className="studio-fieldrow">
-                <label className="studio-field" style={{ maxWidth: 170 }}>
+                {!screenplay ? <label className="studio-field" style={{ maxWidth: 170 }}>
                   <span className="studio-label">多稿对照</span>
                   <div className="studio-multirow">
                     <button
@@ -380,7 +440,7 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
                       </select>
                     ) : null}
                   </div>
-                </label>
+                </label> : null}
                 {tool.styleField ? (
                   <label className="studio-field" style={{ maxWidth: 150 }}>
                     <span className="studio-label">文风</span>
@@ -441,7 +501,7 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
                     type="button"
                     className="studio-stop"
                     style={{ justifyContent: 'flex-start' }}
-                    disabled={!activePath || !activeContent.trim()}
+                    disabled={!activePath || !activeContent.trim() || running || savingResult}
                     onClick={() => setInputText(activeContent.slice(0, 12000))}
                     title={activePath ? `从 ${activePath} 填入` : '先在右侧面板打开一个文件'}
                   >
@@ -459,14 +519,16 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
                   停止
                 </button>
               ) : (
-                <button className="studio-run" onClick={run} disabled={!inputText.trim()}>
+                <button className="studio-run" onClick={run} disabled={!inputText.trim() || savingResult}>
                   <Icon name="sparkles" size={14} />
                   生成
                 </button>
               )}
               {runState === 'running' ? <span className="studio-status">生成中……</span> : null}
-              {runState === 'error' ? <span className="studio-status err">{errMsg}</span> : null}
+              {runState === 'error' ? <span className="studio-status err" role="alert">{errMsg}</span> : null}
               {runState === 'done' ? <span className="studio-status">完成 · {result.length} 字</span> : null}
+              {runState === 'stopped' ? <span className="studio-status" role="status">已停止 · 未完成文本仅供复制</span> : null}
+              {screenplay ? <span className="studio-status">输入会发送给所选模型；结果不会自动写入剧本。</span> : null}
             </div>
 
             <div className="studio-result">
@@ -475,33 +537,33 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
                   <Icon name="file-text" size={12} />
                   结果
                 </span>
-                <div style={{ display: 'flex', gap: 2 }}>
+                <div className="studio-result-actions">
                   <button className="ok" onClick={copyResult} disabled={!hasResult || running}>
                     <Icon name="check" size={12} />
                     复制
                   </button>
-                  <button className="ok" onClick={() => void saveAsFile()} disabled={!hasResult || running} title="保存到 studio/ 目录">
+                  <button className="ok" onClick={() => void saveAsFile()} disabled={!canApply} title="保存到 studio/ 目录">
                     <Icon name="download" size={12} />
                     存为文件
                   </button>
-                  <button className="ok" onClick={openSaveChapter} disabled={!hasResult || running} title="写入新章节文件并纳入章节管理">
+                  {(!screenplay || tool.id === 'script-scene') ? <button className="ok" onClick={openSaveChapter} disabled={!canApply || !!chapterSaved}>
                     <Icon name="file-plus" size={12} />
-                    存为章节
-                  </button>
-                  <button
+                    {screenplay ? '存为新场次' : '存为章节'}
+                  </button> : null}
+                  {!isReview ? <button
                     className="ok"
                     onClick={insertToEditor}
-                    disabled={!hasResult || running || !activePath}
+                    disabled={!canApply || !activePath}
                     title={activePath ? `插入到 ${activePath}` : '先在右侧面板打开一个文件'}
                   >
                     <Icon name="arrow-right" size={12} />
                     插入编辑器
-                  </button>
-                  {canReplaceSelection && onReplaceSelection ? (
+                  </button> : null}
+                  {!isReview && canReplaceSelection && onReplaceSelection ? (
                     <button
                       className="ok"
                       onClick={replaceInEditor}
-                      disabled={!hasResult || running}
+                      disabled={!canApply}
                       title="用结果替换编辑器中原来的选中文本（润改闭环）"
                     >
                       <Icon name="square-pen" size={12} />
@@ -510,6 +572,8 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
                   ) : null}
                 </div>
               </div>
+              {savedFile ? <span className="studio-saved-ok" role="status">已保存到 {savedFile}</span> : null}
+              {saveError ? <span className="studio-status err" role="alert">{saveError}</span> : null}
               {saveChapterOpen ? (
                 <div className="studio-savechapter">
                   <input
@@ -517,21 +581,25 @@ export function StudioDialog({ initialToolId, initialText, activePath, activeCon
                     style={{ minHeight: 0, flex: 1 }}
                     value={chapterTitle}
                     onChange={(e) => setChapterTitle(e.target.value)}
-                    placeholder="章节标题（缺省用「第 N 章」）"
+                    maxLength={screenplay ? 100 : undefined}
+                    aria-label={screenplay ? '新场次标题' : '新章节标题'}
+                    placeholder={screenplay ? '场次标题（可留空）' : '章节标题（缺省用「第 N 章」）'}
+                    disabled={savingResult || !!chapterSaved}
                     spellCheck={false}
                   />
                   {chapterSaved ? (
                     <span className="studio-saved-ok">
                       <Icon name="check-circle" size={13} />
                       已存入 {chapterSaved}
+                      {screenplay && onOpenSavedScene ? <button className="studio-stop" onClick={() => { onClose(); onOpenSavedScene(chapterSaved) }}>打开新场次</button> : null}
                     </span>
                   ) : (
                     <>
-                      <button className="studio-run" onClick={() => void saveAsChapter()}>
+                      <button className="studio-run" disabled={!canApply} onClick={() => void saveAsChapter()}>
                         <Icon name="check" size={12} />
-                        写入
+                        {savingResult ? '保存中…' : '写入'}
                       </button>
-                      <button className="studio-stop" onClick={() => setSaveChapterOpen(false)}>
+                      <button className="studio-stop" disabled={savingResult} onClick={() => setSaveChapterOpen(false)}>
                         取消
                       </button>
                     </>
