@@ -23,7 +23,7 @@ export async function collectAssets(directory, version) {
       `Iris-Creation_${version}_aarch64.dmg`,
       `Iris-Creation_${version}_amd64.AppImage`,
       `Iris-Creation_${version}_amd64.deb`,
-      `Iris-Creation_${version}_amd64.rpm`,
+      `Iris-Creation-${version}-1.x86_64.rpm`,
     ])
     const actualNames = files.map((path) => basename(path))
     if (actualNames.length !== expectedNames.size || actualNames.some((name) => !expectedNames.has(name))) {

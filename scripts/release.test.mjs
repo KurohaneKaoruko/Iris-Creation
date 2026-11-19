@@ -40,7 +40,7 @@ test('only complete installer sets are accepted and checksummed', async (t) => {
     'Iris-Creation_0.1.1-rc.1_aarch64.dmg',
     'Iris-Creation_0.1.1-rc.1_amd64.AppImage',
     'Iris-Creation_0.1.1-rc.1_amd64.deb',
-    'Iris-Creation_0.1.1-rc.1_amd64.rpm',
+    'Iris-Creation-0.1.1-rc.1-1.x86_64.rpm',
   ]
   for (const name of names) await writeFile(join(root, name), name)
   const assets = await collectAssets(root, '0.1.1-rc.1')
@@ -51,7 +51,7 @@ test('only complete installer sets are accepted and checksummed', async (t) => {
   await writeFile(join(root, 'iris-creation.exe'), 'not a standalone installer')
   await assert.rejects(collectAssets(root, '0.1.1-rc.1'), /Expected only the five/)
   await rm(join(root, 'iris-creation.exe'))
-  await writeFile(join(root, 'Iris-Creation_0.1.1-rc.1_amd64.rpm'), '')
+  await writeFile(join(root, 'Iris-Creation-0.1.1-rc.1-1.x86_64.rpm'), '')
   await assert.rejects(collectAssets(root, '0.1.1-rc.1'), /Empty installer/)
 })
 
