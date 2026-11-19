@@ -72,9 +72,11 @@ They will:
 1. Validate version format (`x.y.z`).
 2. Update versions in:
    - `package.json`
+   - `webui/package.json`
    - `src-tauri/Cargo.toml`
+   - `src-tauri/Cargo.lock` (this package only)
    - `src-tauri/tauri.conf.json`
-3. Run build checks (unless skipped).
+3. Require `docs/releases/v<version>.md`, then run type checks, frontend/release/backend tests and production build (unless skipped).
 4. Create commit + tag (`v<version>`).
 5. Push commit and tag (unless disabled).
 
@@ -99,3 +101,13 @@ Optional flags:
 - Do not push: `-NoPush` / `--no-push`
 
 Tag push (`v*`) will trigger GitHub workflow `.github/workflows/tauri-release.yml` to build bundles and create a GitHub Release automatically.
+
+### Safety and acceptance
+
+- `node scripts/version.mjs set 0.1.1-rc.1` updates all five version authorities; `node scripts/version.mjs check v0.1.1-rc.1` verifies the tag too.
+- `node --test scripts/release.test.mjs` checks publication safety without network access.
+- `node scripts/smoke-test.mjs [server-binary]` starts the real server with temporary data and a localhost fake model endpoint. Build the production frontend and server first. It never needs a real API key.
+- The release workflow validates frontend/tests before bundling, runs Rust and local RPC acceptance on each platform, and uploads only complete installers.
+- `publish-release.mjs` requires exactly one versioned NSIS setup EXE, Apple Silicon DMG, Linux x64 AppImage, DEB and RPM. It adds SHA256SUMS, creates a draft and checks GitHub's uploaded size/digest before publishing. Existing drafts or public releases are never deleted or overwritten. Errors leave the remote state for manual inspection.
+- SemVer prereleases are explicitly non-Latest prereleases. Workflow re-runs against an existing release intentionally fail rather than deleting a working download.
+- `docs/acceptance-v0.1.1-rc.1.md` separates automated checks from the outstanding real-device/model/upgrade tests.

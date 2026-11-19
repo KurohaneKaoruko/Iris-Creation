@@ -52,6 +52,11 @@ jobs:
       - name: Type check
         run: pnpm run lint
 
+      - name: Release safety and version checks
+        run: |
+          node scripts/version.mjs check
+          node --test scripts/release.test.mjs
+
       - name: Build
         run: pnpm run build
 
@@ -60,6 +65,12 @@ jobs:
 
       - name: Rust regression tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build acceptance server
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin iris-creation-server
+
+      - name: Local RPC and mock-provider acceptance
+        run: node scripts/smoke-test.mjs
 
       - name: Test
         run: pnpm run test

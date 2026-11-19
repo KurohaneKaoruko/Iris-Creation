@@ -100,7 +100,7 @@ pnpm run tauri:ios:dev
 - **`agent_system.rs`** - AI 代理运行时，包含工具注册表和记忆存储
 - **`skills/mod.rs`** - 写作技能：内置技能 + Novelist-Skills 子模块（`skills/` 目录，编译期内嵌 + 运行时目录覆盖）
 - **`app_settings.rs`** - 应用设置和提供商配置
-- **`secrets.rs`** - API 密钥存储（平台特定：Windows DPAPI，macOS/Linux keyring）
+- **`secrets.rs`** - API 密钥存储：Windows DPAPI；当前 macOS/Linux 仅 Base64 编码本地文件，并非 keyring 或加密，不得宣称跨平台加密存储
 - **`chat_history.rs`** - 聊天会话持久化
 
 ### 作品目录结构
@@ -186,6 +186,15 @@ pnpm exec vite            # dev 服务器端口 1421，/api /ws 代理到 8765
 - vite **不要**手动分包（manualChunks 会破坏 Prism 全局初始化契约，导致白屏）
 - 视觉规范教训：emoji 图标+玻璃拟态+999px 胶囊是「廉价感」三大来源（2026-11 用户否决）；设计令牌用 global.css 的 --radius-sm/radius/lg/xl 四档圆角与 --bg-primary/secondary/tertiary/elev 四级实体表面；弹层遮罩一律 var(--overlay) 不写死 rgba（浅色主题会发黑）
 - 测试：`pnpm exec vitest run`（include `src/**/*.test.ts(x)`；`.gitignore` 白名单已放开 `.test.tsx`）
+
+### 候选版发布与验收
+
+- `scripts/version.mjs` 统一校验/设置根 package、webui package、Tauri config、Cargo.toml 与 Cargo.lock 的本项目版本；标签必须一致。
+- `scripts/release.test.mjs` 为 Node 原生测试，验证版本同步、安装包集、HTTP/JSON 错误、已有 Release 不覆盖与上传哈希闸门。
+- `scripts/smoke-test.mjs` 启动真实服务并隔离临时数据，用本机模拟 Provider 验证保存、冲突、历史恢复、导出、流式/停止/错误和重启；不能冒充真实模型或安装器验收。
+- GitHub 发布先做测试和跨平台打包，再由 `scripts/publish-release.mjs` 创建草稿、核对五类安装包及 SHA256SUMS；服务端大小/哈希通过后公开，预发布不设 Latest。不删除既有 Release；失败草稿需人工检查。
+- “备份”页仅是文件校验清单，不包含正文副本；完整备份/恢复必须另行复制作品目录，不得误报备份完成。
+- 人工平台验收清单在 `docs/acceptance-v0.1.1-rc.1.md`；构建成功不等于真机验收成功。
 
 ## 代码约定
 

@@ -1,6 +1,9 @@
 //! 外部 Agent CLI 集成测试：用假 CLI 可执行文件验证"检测 → 任务 → 快照 → 变更集 → 审阅"全流程。
 //!
 //! 假 CLI：PATH 中的 `fake-writer` 脚本，在 cwd 内写两个文件（模拟 CLI 直接写作品目录）。
+//! 此 fixture 使用 POSIX shell；Windows 仍运行其余单元测试、启动回归和 RPC 验收。
+
+#![cfg(unix)]
 
 use iris_creation::services::agent_cli::{
     self, CliTaskRequest, decide_change, detect_clis, run_task,
@@ -9,7 +12,7 @@ use iris_creation::state::AppState;
 use std::path::PathBuf;
 
 fn fake_bin_dir() -> PathBuf {
-    PathBuf::from("/tmp/opencode/fake-bin")
+    std::env::temp_dir().join(format!("iris-cli-fixture-{}", std::process::id()))
 }
 
 /// 创建 fake-writer 本体：在 cwd 内修改 ch1、新增 ch2，输出标记文本。
@@ -51,7 +54,7 @@ fn install_fake_claude() {
     let link = dir.join("claude");
     let _ = std::fs::write(
         &link,
-        "#!/bin/bash\nexec /tmp/opencode/fake-bin/fake-writer \"$@\"\n",
+        "#!/bin/sh\nexec \"$(dirname \"$0\")/fake-writer\" \"$@\"\n",
     );
     #[cfg(unix)]
     {

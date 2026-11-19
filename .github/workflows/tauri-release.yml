@@ -7,11 +7,42 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate candidate
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            webui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir webui install --frozen-lockfile
+      - name: Check unified version and tag
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: node scripts/version.mjs check "$RELEASE_TAG"
+      - run: node --test scripts/release.test.mjs
+      - run: pnpm run lint
+      - run: pnpm run test
+      - run: pnpm run build
+
   bundle:
     name: Bundle (${{ matrix.name }})
+    needs: validate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -43,7 +74,9 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            webui/pnpm-lock.yaml
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -70,8 +103,18 @@ jobs:
         shell: bash
         run: pnpm exec tauri icon src-tauri/icons/icon.png --output src-tauri/icons
 
+      - name: Test backend
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
       - name: Build Tauri bundles
         run: pnpm run tauri:build
+
+      - name: Build acceptance server
+        run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin iris-creation-server
+
+      - name: Local RPC and mock-provider acceptance
+        shell: bash
+        run: node scripts/smoke-test.mjs "src-tauri/target/release/iris-creation-server${{ matrix.name == 'windows' && '.exe' || '' }}"
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
@@ -79,20 +122,24 @@ jobs:
           name: ${{ matrix.artifact_name }}
           if-no-files-found: error
           path: |
-            src-tauri/target/release/bundle/**
-            src-tauri/target/release/*.exe
-            src-tauri/target/release/*.msi
-            src-tauri/target/release/*.dmg
-            src-tauri/target/release/*.AppImage
-            src-tauri/target/release/*.deb
-            src-tauri/target/release/*.rpm
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
 
   release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: bundle
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -100,44 +147,7 @@ jobs:
           pattern: bundle-*
           merge-multiple: true
 
-      - name: Delete stale release for this tag
+      - name: Verify installers and publish without replacing existing releases
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          # softprops 只追加不清理：重跑会把旧 run 残留产物永久留在 release 里。
-          # 发布前删除同名 release（连产物整对象删除），本次发布全新落盘。
-          # 防御：gh api 的错误 JSON 可能混入 stdout，id 必须严格为数字才执行删除。
-          RESP=$(gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" 2>/dev/null || true)
-          RELEASE_ID=$(printf '%s' "$RESP" | jq -r '.id // empty' 2>/dev/null || true)
-          case "$RELEASE_ID" in
-            ''|*[!0-9]*)
-              echo "无同名 release，全新发布"
-              ;;
-            *)
-              echo "发现旧 release（id=$RELEASE_ID），连产物一起删除..."
-              gh api -X DELETE "repos/${{ github.repository }}/releases/$RELEASE_ID"
-              echo "已删除"
-              ;;
-          esac
-          # 历史中断遗留的同 tag 草稿顺带清理，单个失败不阻塞发布
-          DRAFTS=$(gh api "repos/${{ github.repository }}/releases" --paginate 2>/dev/null \
-            | jq -r --arg tag "${{ github.ref_name }}" '.[] | select(.draft == true and .tag_name == $tag) | .id' 2>/dev/null || true)
-          for rid in $DRAFTS; do
-            case "$rid" in
-              *[!0-9]*|'') continue ;;
-              *) echo "清理同 tag 草稿 release（id=$rid）..."; gh api -X DELETE "repos/${{ github.repository }}/releases/$rid" || true ;;
-            esac
-          done
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            release-artifacts/**/*.exe
-            release-artifacts/**/*.dmg
-            release-artifacts/**/*.AppImage
-            release-artifacts/**/*.deb
-            release-artifacts/**/*.rpm
+        run: node scripts/publish-release.mjs release-artifacts

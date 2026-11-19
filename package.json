@@ -1,7 +1,7 @@
 {
   "name": "iris-creation",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1-rc.1",
   "type": "module",
   "scripts": {
     "sync:branding": "node ./scripts/sync-branding.mjs",
@@ -13,6 +13,8 @@
     "preview": "pnpm --dir webui preview",
     "test": "pnpm --dir webui exec vitest --run",
     "test:watch": "pnpm --dir webui exec vitest",
+    "test:release": "node --test scripts/release.test.mjs",
+    "version:check": "node scripts/version.mjs check",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",

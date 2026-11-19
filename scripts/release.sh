@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([\-+][0-9A-Za-z\.-]+)?$ ]]; then
+if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
   echo "Invalid version '$VERSION'. Example: 0.2.0 or 0.2.0-beta.1" >&2
   exit 1
 fi
@@ -70,40 +70,25 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   exit 1
 fi
 
-echo "Updating versions to $VERSION ..."
-
-RELEASE_VERSION="$VERSION" node <<'NODE'
-const fs = require("node:fs");
-const path = require("node:path");
-const version = process.env.RELEASE_VERSION;
-if (!version) throw new Error("RELEASE_VERSION is empty");
-
-const packagePath = path.resolve("package.json");
-const tauriConfPath = path.resolve("src-tauri/tauri.conf.json");
-const cargoPath = path.resolve("src-tauri/Cargo.toml");
-
-const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-pkg.version = version;
-fs.writeFileSync(packagePath, JSON.stringify(pkg, null, 2) + "\n");
-
-const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, "utf8"));
-tauriConf.version = version;
-fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2) + "\n");
-
-const cargoRaw = fs.readFileSync(cargoPath, "utf8");
-const cargoUpdated = cargoRaw.replace(/^version\s*=\s*"[^"]+"/m, `version = "${version}"`);
-if (cargoUpdated === cargoRaw) {
-  throw new Error("Failed to update version in src-tauri/Cargo.toml");
-}
-fs.writeFileSync(cargoPath, cargoUpdated);
-NODE
-
-if [[ "$SKIP_CHECKS" -ne 1 ]]; then
-  run_step "$PACKAGE_MANAGER" run build
-  run_step cargo check --manifest-path src-tauri/Cargo.toml --target-dir .cargo-target
+if [[ ! -f "docs/releases/$TAG.md" ]]; then
+  echo "Missing release notes: docs/releases/$TAG.md" >&2
+  exit 1
 fi
 
-run_step git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+echo "Updating versions to $VERSION ..."
+
+run_step node scripts/version.mjs set "$VERSION"
+run_step node scripts/version.mjs check "$TAG"
+
+if [[ "$SKIP_CHECKS" -ne 1 ]]; then
+  run_step "$PACKAGE_MANAGER" run lint
+  run_step "$PACKAGE_MANAGER" run test
+  run_step node --test scripts/release.test.mjs
+  run_step "$PACKAGE_MANAGER" run build
+  run_step cargo test --locked --manifest-path src-tauri/Cargo.toml
+fi
+
+run_step git add package.json webui/package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
 
 if [[ -z "$(git diff --cached --name-only)" ]]; then
   echo "No staged version changes detected." >&2

@@ -80,17 +80,17 @@ export function BackupTab() {
       <div className="bkp-intro">
         <Icon name="package" size={16} />
         <div>
-          <div className="bkp-title">工程备份快照</div>
+          <div className="bkp-title">工程文件校验清单（非完整备份）</div>
           <div className="bkp-desc">
             生成全工程文件清单报告：逐文件记录字数、大小与 SHA-256 校验值，写入 <code>exports/backups/</code>。
-            用于追溯「某个时间点工程里有什么、内容是否被改动」；恢复整目录请配合系统级冷备份。
+            此报告不包含正文副本，不能用于恢复丢失的文件。完整备份请先保存并关闭作品，再将整个作品目录复制到其他磁盘或备份服务。
           </div>
         </div>
       </div>
 
       <div className="bkp-actions">
         <button className="tools-run primary" disabled={busy || !files || files.length === 0} onClick={() => void run()}>
-          {busy ? `备份中 ${progress}/${files?.length ?? 0}…` : <><Icon name="download" size={14} />生成备份快照</>}
+          {busy ? `生成中 ${progress}/${files?.length ?? 0}…` : <><Icon name="download" size={14} />生成校验清单</>}
         </button>
         <span className="tools-run-hint">
           {files === null ? '扫描工程中…' : `${files.length} 个文件将纳入清单（exports/ 产物不重复纳入）`}
@@ -99,7 +99,7 @@ export function BackupTab() {
 
       {done ? (
         <div className="tools-ok">
-          <Icon name="check-circle" size={14} /> 备份完成：<code className="exp-path">{done}</code>
+          <Icon name="check-circle" size={14} /> 校验清单已生成（不含正文副本）：<code className="exp-path">{done}</code>
         </div>
       ) : null}
       {err ? <div className="tools-err">{err}</div> : null}
@@ -116,7 +116,7 @@ export function BackupTab() {
           {files.length > 30 ? <div className="bkp-more">…共 {files.length} 个</div> : null}
         </div>
       ) : files !== null ? (
-        <div className="tools-hint">工程内暂无可备份文件。</div>
+        <div className="tools-hint">工程内暂无可纳入清单的文件。</div>
       ) : null}
     </div>
   )
