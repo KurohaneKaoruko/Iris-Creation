@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { collectAssets, publishRelease, verifyAssets } from './publish-release.mjs'
+import { linuxBundlePlan } from './build-linux-bundles.mjs'
 import { checkVersions, setVersion, validateVersion } from './version.mjs'
 
 async function fixture(t) {
@@ -40,7 +41,7 @@ test('only complete installer sets are accepted and checksummed', async (t) => {
     'Iris-Creation_0.1.1-rc.1_aarch64.dmg',
     'Iris-Creation_0.1.1-rc.1_amd64.AppImage',
     'Iris-Creation_0.1.1-rc.1_amd64.deb',
-    'Iris-Creation-0.1.1-rc.1-1.x86_64.rpm',
+    'Iris-Creation-0.1.1-0.rc.1.x86_64.rpm',
   ]
   for (const name of names) await writeFile(join(root, name), name)
   const assets = await collectAssets(root, '0.1.1-rc.1')
@@ -51,8 +52,34 @@ test('only complete installer sets are accepted and checksummed', async (t) => {
   await writeFile(join(root, 'iris-creation.exe'), 'not a standalone installer')
   await assert.rejects(collectAssets(root, '0.1.1-rc.1'), /Expected only the five/)
   await rm(join(root, 'iris-creation.exe'))
-  await writeFile(join(root, 'Iris-Creation-0.1.1-rc.1-1.x86_64.rpm'), '')
+  await writeFile(join(root, 'Iris-Creation-0.1.1-0.rc.1.x86_64.rpm'), '')
   await assert.rejects(collectAssets(root, '0.1.1-rc.1'), /Empty installer/)
+})
+
+test('Linux prerelease build keeps app SemVer and maps only RPM metadata to sortable prerelease fields', () => {
+  const plan = linuxBundlePlan('0.1.1-rc.3')
+  assert.deepEqual(plan.build, ['exec', 'tauri', 'build', '--ci', '--bundles', 'deb,appimage'])
+  assert.deepEqual(plan.rpm.slice(0, 6), ['exec', 'tauri', 'bundle', '--ci', '--bundles', 'rpm'])
+  const config = JSON.parse(plan.rpm.at(-1))
+  assert.equal(config.version, '0.1.1')
+  assert.equal(config.bundle.linux.rpm.release, '0.rc.3')
+  const rc10 = JSON.parse(linuxBundlePlan('0.1.1-rc.10').rpm.at(-1))
+  assert.equal(rc10.bundle.linux.rpm.release, '0.rc.10')
+  assert.equal(linuxBundlePlan('0.1.1').rpm, null)
+  assert.deepEqual(linuxBundlePlan('0.1.1').build, ['exec', 'tauri', 'build', '--ci'])
+})
+
+test('stable release RPM keeps the normal version/release filename', async (t) => {
+  const root = await fixture(t)
+  const names = [
+    'Iris-Creation_0.1.1_x64-setup.exe',
+    'Iris-Creation_0.1.1_aarch64.dmg',
+    'Iris-Creation_0.1.1_amd64.AppImage',
+    'Iris-Creation_0.1.1_amd64.deb',
+    'Iris-Creation-0.1.1-1.x86_64.rpm',
+  ]
+  for (const name of names) await writeFile(join(root, name), name)
+  assert.equal((await collectAssets(root, '0.1.1')).length, 6)
 })
 
 function setup(overrides = {}) {

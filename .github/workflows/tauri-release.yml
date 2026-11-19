@@ -103,8 +103,13 @@ jobs:
         shell: bash
         run: pnpm exec tauri icon src-tauri/icons/icon.png --output src-tauri/icons
 
-      - name: Build Tauri bundles
-        run: pnpm run tauri:build
+      - name: Build Windows/macOS Tauri bundles
+        if: matrix.name != 'linux'
+        run: pnpm run tauri:build -- --ci
+
+      - name: Build Linux bundles (RPM prerelease version compatibility)
+        if: matrix.name == 'linux'
+        run: node scripts/build-linux-bundles.mjs
 
       - name: Build acceptance server
         run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin iris-creation-server

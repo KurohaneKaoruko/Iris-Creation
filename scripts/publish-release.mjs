@@ -18,12 +18,14 @@ export async function collectAssets(directory, version) {
   await walk(directory)
   if (version) {
     // Reject stale/wrong-architecture artifacts before they can reach a release.
+    const prerelease = version.match(/^(\d+\.\d+\.\d+)-([0-9A-Za-z.-]+)$/)
+    const rpmRelease = prerelease ? `0.${prerelease[2].replaceAll('-', '.')}` : '1'
     const expectedNames = new Set([
       `Iris-Creation_${version}_x64-setup.exe`,
       `Iris-Creation_${version}_aarch64.dmg`,
       `Iris-Creation_${version}_amd64.AppImage`,
       `Iris-Creation_${version}_amd64.deb`,
-      `Iris-Creation-${version}-1.x86_64.rpm`,
+      `Iris-Creation-${prerelease ? prerelease[1] : version}-${rpmRelease}.x86_64.rpm`,
     ])
     const actualNames = files.map((path) => basename(path))
     if (actualNames.length !== expectedNames.size || actualNames.some((name) => !expectedNames.has(name))) {
