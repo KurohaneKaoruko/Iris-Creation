@@ -111,4 +111,4 @@ Tag push (`v*`) will trigger GitHub workflow `.github/workflows/tauri-release.ym
 - `publish-release.mjs` requires exactly one versioned NSIS setup EXE, Apple Silicon DMG, Linux x64 AppImage, DEB and RPM. It adds SHA256SUMS, creates a draft and checks GitHub's uploaded size/digest before publishing. Existing drafts or public releases are never deleted or overwritten. Errors leave the remote state for manual inspection.
 - Linux bundles use `scripts/build-linux-bundles.mjs`: RPM's Version field rejects the SemVer prerelease hyphen, so only the RPM metadata is normalized while the app binary/DEB/AppImage retain the candidate version.
 - SemVer prereleases are explicitly non-Latest prereleases. Workflow re-runs against an existing release intentionally fail rather than deleting a working download.
-- `docs/acceptance-v0.1.1-rc.4.md` separates automated checks from the outstanding real-device/model/upgrade tests.
+- `docs/acceptance-v0.1.1-rc.5.md` separates automated checks from the outstanding real-device/model/upgrade tests.

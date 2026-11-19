@@ -105,7 +105,7 @@ jobs:
 
       - name: Build Windows/macOS Tauri bundles
         if: matrix.name != 'linux'
-        run: pnpm run tauri:build -- --ci
+        run: pnpm run tauri:build
 
       - name: Build Linux bundles (RPM prerelease version compatibility)
         if: matrix.name == 'linux'
