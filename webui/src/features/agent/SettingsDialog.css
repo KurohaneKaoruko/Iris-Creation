@@ -49,6 +49,11 @@
   font-weight: 600;
 }
 
+.set-save:disabled, .set-x:disabled, .set-add:disabled, .set-test:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
 .set-x {
   display: inline-flex;
   align-items: center;

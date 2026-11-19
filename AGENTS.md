@@ -64,7 +64,7 @@ pnpm run tauri:ios:dev
   - `SessionSidebar.tsx` - 历史会话（`list/get/save_chat_session`，按工程过滤，标题自动取首条用户消息）
   - `Markdown.tsx` - 零依赖 Markdown 渲染器（围栏代码块/表格/列表/行内格式，有单测）
   - `StepCard.tsx` - 工具步骤卡（订阅 `ai_agent_step` WS 事件，Cline 式可折叠）
-  - `SettingsDialog.tsx` - 模型 Provider 管理（Key 走 secrets 通道、测试连接、单选激活）
+  - `SettingsDialog.tsx` - 模型 Provider 管理（Key 走 secrets 通道、测试连接、单选激活）；配置保存失败会保留草稿并阻止错误地切换激活 Provider，所有设置写入串行化
   - `FileTree.tsx` - 递归文件树（重命名/删除/新建，`fs_changed` 事件驱动刷新）
   - `ChaptersPanel.tsx` - 章节页签（字数/状态三态循环/拖拽排序/新建/导入直跳）
   - `LorePanel.tsx` - 设定页签（人物卡/关系图/情节线/设定集四合一，直读 novel.ts 解析 concept|outline 下的 Markdown）
