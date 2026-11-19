@@ -194,7 +194,7 @@ pnpm exec vite            # dev 服务器端口 1421，/api /ws 代理到 8765
 - `scripts/smoke-test.mjs` 启动真实服务并隔离临时数据，用本机模拟 Provider 验证保存、冲突、历史恢复、导出、流式/停止/错误和重启；不能冒充真实模型或安装器验收。
 - GitHub 发布先做测试和跨平台打包，再由 `scripts/publish-release.mjs` 创建草稿、核对五类安装包及 SHA256SUMS；服务端大小/哈希通过后公开，预发布不设 Latest。不删除既有 Release；失败草稿需人工检查。
 - “备份”页仅是文件校验清单，不包含正文副本；完整备份/恢复必须另行复制作品目录，不得误报备份完成。
-- 人工平台验收清单在 `docs/acceptance-v0.1.1-rc.2.md`；构建成功不等于真机验收成功。
+- 人工平台验收清单在 `docs/acceptance-v0.1.1-rc.3.md`；构建成功不等于真机验收成功。
 
 ## 代码约定
 

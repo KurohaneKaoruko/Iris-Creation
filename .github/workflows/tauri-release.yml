@@ -103,11 +103,6 @@ jobs:
         shell: bash
         run: pnpm exec tauri icon src-tauri/icons/icon.png --output src-tauri/icons
 
-      - name: Portable backend regression
-        # The complete Rust suite runs in main CI. Bundle jobs compile and run
-        # portable library/startup tests; do not rerun all targets three times.
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --test desktop_startup
-
       - name: Build Tauri bundles
         run: pnpm run tauri:build
 
