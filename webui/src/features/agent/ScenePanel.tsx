@@ -15,9 +15,10 @@ type Props = {
   onExport: () => void
   onOutline: () => void
   onCharacters: () => void
+  onStoryboard?: () => void
 }
 
-export function ScenePanel({ workspace, scenes, activePath, loading, loadError, onOpen, onNew, onRefresh, onExport, onOutline, onCharacters }: Props) {
+export function ScenePanel({ workspace, scenes, activePath, loading, loadError, onOpen, onNew, onRefresh, onExport, onOutline, onCharacters, onStoryboard }: Props) {
   const [moving, setMoving] = useState(false)
   const [notice, setNotice] = useState<{ message: string; error?: boolean } | null>(null)
   const inFlight = useRef(false)
@@ -52,6 +53,7 @@ export function ScenePanel({ workspace, scenes, activePath, loading, loadError, 
       <button className="agw-btn" onClick={onOutline}><Icon name="list-checks" size={14} />分场大纲</button>
       <button className="agw-btn" onClick={onCharacters}><Icon name="user" size={14} />人物表</button>
       <button className="agw-btn" onClick={onExport}><Icon name="download" size={14} />导出剧本</button>
+      {onStoryboard ? <button className="agw-btn" onClick={onStoryboard}><Icon name="clapperboard" size={14} />分镜与素材</button> : null}
     </div>
     {loadError ? <div className="scene-notice error" role="alert">{loadError} <button className="agw-btn" onClick={() => void onRefresh()}>重试</button></div> : null}
     {notice ? <div className={`scene-notice${notice.error ? ' error' : ''}`} role={notice.error ? 'alert' : 'status'}>{notice.message}</div> : null}

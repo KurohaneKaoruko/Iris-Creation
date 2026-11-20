@@ -138,6 +138,64 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
       Ok(json!(null))
     }
 
+    // ---- screenplay storyboard / local media assets ----
+    "load_storyboard" | "save_storyboard_shot" | "remove_storyboard_shot" | "reorder_storyboard_shots"
+      | "detach_storyboard_asset" | "import_storyboard_image"
+      | "save_storyboard_export" | "read_creative_image" => {
+      use base64::Engine;
+      use crate::services::{local_assets, storyboard, workspace::scoped_workspace};
+      let expected = workspace.as_deref().ok_or("missing argument: workspaceRoot")?;
+      let root = scoped_workspace(state, Some(expected))?;
+      // Image decoding and synced writes must not block the async HTTP executor.
+      let command = command.to_owned();
+      return tokio::task::spawn_blocking(move || match command.as_str() {
+        "load_storyboard" => serde_json::to_value(storyboard::load(&root)?).map_err(|e| e.to_string()),
+        "save_storyboard_shot" => {
+          let revision = arg_opt_str(&args, &["revision"]);
+          let draft = arg_t(&args, "shot")?;
+          serde_json::to_value(storyboard::save_shot(&root, revision.as_deref(), draft)?).map_err(|e| e.to_string())
+        }
+        "remove_storyboard_shot" => {
+          let revision = arg_opt_str(&args, &["revision"]);
+          let id: uuid::Uuid = arg_t(&args, "shotId")?;
+          serde_json::to_value(storyboard::remove_shot(&root, revision.as_deref(), id)?).map_err(|e| e.to_string())
+        }
+        "reorder_storyboard_shots" => {
+          let revision = arg_opt_str(&args, &["revision"]);
+          let expected_ids: Vec<uuid::Uuid> = arg_t(&args, "expectedIds")?;
+          let ids: Vec<uuid::Uuid> = arg_t(&args, "ids")?;
+          serde_json::to_value(storyboard::reorder(&root, revision.as_deref(), expected_ids, ids)?).map_err(|e| e.to_string())
+        }
+        "detach_storyboard_asset" => {
+          let revision = arg_opt_str(&args, &["revision"]);
+          let id: uuid::Uuid = arg_t(&args, "id")?;
+          serde_json::to_value(storyboard::detach_asset(&root, revision.as_deref(), id)?).map_err(|e| e.to_string())
+        }
+        "import_storyboard_image" => {
+          let revision = arg_opt_str(&args, &["revision"]);
+          let shot_id: Option<uuid::Uuid> = arg_t(&args, "shotId")?;
+          let name = arg_str(&args, &["name"])?;
+          let original_name = arg_str(&args, &["originalName"])?;
+          let role = arg_t(&args, "role")?;
+          let encoded = arg_str(&args, &["base64"])?;
+          const MAX_ENCODED: usize = (local_assets::IMPORT_LIMIT + 2) / 3 * 4;
+          if encoded.len() > MAX_ENCODED { return Err("导入图片不能超过 10 MB。".into()); }
+          let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "图片编码无效。")?;
+          serde_json::to_value(storyboard::import_image(&root, revision.as_deref(), shot_id, role, name, original_name, &bytes)?).map_err(|e| e.to_string())
+        }
+        "save_storyboard_export" => {
+          let revision = arg_opt_str(&args, &["revision"]);
+          storyboard::export(&root, revision.as_deref()).map(|path| json!(path))
+        }
+        _ => {
+          let id: uuid::Uuid = arg_t(&args, "id")?;
+          let encoded = storyboard::preview_asset(&root, id)?;
+          // Only a checked, re-encoded PNG thumbnail is returned to the browser.
+          serde_json::to_value(encoded).map_err(|e| e.to_string())
+        }
+      }).await.map_err(|_| "本地分镜操作异常退出，原稿未更改。".to_string())?;
+    }
+
     // ---- screenplay: mutations and reads are bound to the project that opened the UI ----
     "list_screenplay_scenes" | "create_screenplay_scene" | "reorder_screenplay_scenes" | "save_screenplay_export" => {
       use crate::services::{screenplay, workspace::scoped_workspace};

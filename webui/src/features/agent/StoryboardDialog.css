@@ -1,0 +1,56 @@
+.storyboard-overlay { position: fixed; inset: 0; z-index: 92; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--overlay); }
+.storyboard-dialog { position: relative; display: flex; flex-direction: column; width: min(1120px, 96vw); height: min(820px, 94dvh); min-height: 0; overflow: hidden; background: var(--bg-primary); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); outline: none; }
+.storyboard-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); gap: 10px; }
+.storyboard-head h2 { display: flex; align-items: center; gap: 8px; font-size: 16px; }
+.storyboard-head p { margin-top: 4px; font-size: 12px; color: var(--text-secondary); }
+.storyboard-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.storyboard-toolbar [aria-pressed=true] { background: var(--accent-weak); color: var(--accent); }
+.storyboard-spacer { flex: 1; }
+.storyboard-notice { padding: 8px 16px; font-size: 12px; color: var(--success); overflow-wrap: anywhere; }
+.storyboard-notice.error { color: var(--danger); }
+.storyboard-notice.warning { color: var(--warn); }
+.storyboard-recovery { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--accent-weak); font-size: 12px; }
+.storyboard-content { flex: 1; min-height: 0; overflow: auto; }
+.storyboard-shots { display: grid; min-height: 100%; }
+.storyboard-shots.has-editor { grid-template-columns: minmax(245px, 0.85fr) minmax(320px, 1.15fr); }
+.storyboard-section-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 12px; font-size: 12px; }
+.storyboard-shot-list ol { list-style: none; padding: 0 12px 12px; display: grid; gap: 8px; }
+.storyboard-shot-list li { border: 1px solid var(--border); background: var(--bg-secondary); border-radius: var(--radius); padding: 10px; min-width: 0; }
+.storyboard-shot-list li.active { border-color: var(--accent); }
+.storyboard-shot-title { display: flex; align-items: baseline; gap: 8px; }
+.storyboard-shot-title > span { color: var(--accent); font-size: 11px; font-variant-numeric: tabular-nums; }
+.storyboard-shot-title button { text-align: left; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.storyboard-shot-title small { margin-left: auto; flex-shrink: 0; color: var(--text-secondary); }
+.storyboard-shot-list li p { color: var(--text-secondary); font-size: 11px; margin: 5px 0; overflow-wrap: anywhere; }
+.storyboard-shot-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; font-size: 11px; color: var(--text-muted); }
+.storyboard-shot-actions .agw-btn { padding: 3px 4px; font-size: 11px; }
+.storyboard-editor { padding: 16px; min-width: 0; border-left: 1px solid var(--border); }
+.storyboard-editor h3, .storyboard-import h3 { font-size: 14px; margin-bottom: 10px; }
+.storyboard-editor fieldset { display: grid; gap: 10px; border: 0; min-width: 0; }
+.storyboard-editor label, .storyboard-import label { display: grid; gap: 4px; font-size: 12px; color: var(--text-secondary); min-width: 0; }
+.storyboard-editor input:not([type=checkbox]), .storyboard-editor select, .storyboard-editor textarea, .storyboard-import input:not([type=file]), .storyboard-import select { width: 100%; min-width: 0; padding: 7px 9px; font-size: 13px; }
+.storyboard-editor textarea { resize: vertical; line-height: 1.7; min-height: 80px; }
+.storyboard-field-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.storyboard-field-row > label { flex: 1; min-width: 85px; }
+.storyboard-editor-actions { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 12px; }
+.storyboard-reference-picker { display: grid; gap: 6px; font-size: 12px; color: var(--text-secondary); max-height: 180px; overflow: auto; }
+.storyboard-reference-picker label { display: flex; align-items: flex-start; gap: 7px; }
+.storyboard-assets { padding: 16px; }
+.storyboard-import { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 14px; }
+.storyboard-import p { font-size: 12px; color: var(--text-secondary); margin: 6px 0 10px; }
+.storyboard-import .storyboard-file-label { display: inline-flex; flex-wrap: wrap; align-items: center; margin-top: 12px; padding: 8px 0; gap: 8px; }
+.storyboard-file-label input { max-width: 100%; font-size: 12px; }
+.storyboard-asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 12px; }
+.storyboard-asset-grid article { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px; min-width: 0; }
+.storyboard-asset-grid article > strong { font-size: 13px; overflow-wrap: anywhere; }
+.storyboard-asset-grid article > span, .storyboard-asset-grid article > small { color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
+.storyboard-preview { width: 100%; aspect-ratio: 16/10; display: flex; align-items: center; justify-content: center; background: var(--bg-secondary); border-radius: var(--radius-sm); overflow: hidden; }
+.storyboard-preview img { width: 100%; height: 100%; object-fit: contain; }
+.storyboard-preview button { display: grid; gap: 7px; justify-items: center; color: var(--text-secondary); font-size: 11px; }
+.storyboard-preview p { color: var(--danger); padding: 8px; font-size: 11px; overflow-wrap: anywhere; }
+.storyboard-empty { padding: 28px 18px; color: var(--text-secondary); text-align: center; font-size: 13px; }
+.storyboard-confirm { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 22px; background: var(--bg-elev); text-align: center; }
+.storyboard-confirm h3 { font-size: 17px; }
+.storyboard-confirm p { color: var(--text-secondary); font-size: 13px; max-width: 55ch; }
+.storyboard-confirm > div { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+@media (max-width: 700px) { .storyboard-overlay { padding: 6px; } .storyboard-dialog { width: 100%; height: 98dvh; } .storyboard-shots.has-editor { display: flex; flex-direction: column-reverse; } .storyboard-editor { border-left: 0; border-bottom: 1px solid var(--border); } .storyboard-section-head { flex-wrap: wrap; } .storyboard-head { padding: 12px; } .storyboard-toolbar { padding: 6px; } .storyboard-toolbar .agw-btn { padding: 5px 8px; } }

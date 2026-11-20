@@ -10,6 +10,8 @@ pub mod chat;
 pub mod dir_browse;
 pub mod fs;
 pub(crate) mod screenplay;
+pub(crate) mod local_assets;
+pub(crate) mod storyboard;
 pub mod settings;
 pub mod workspace;
 

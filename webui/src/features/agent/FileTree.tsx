@@ -32,6 +32,7 @@ function NodeView({
   const [open, setOpen] = useState(depth < 2)
   const isDir = entry.kind === 'dir'
   if (depth > 0 && isHiddenWorkspaceEntry(entry.name)) return null
+  if (isDir && entry.path.toLowerCase() === 'creative' && canManage && !canManage(entry.path)) return null
 
   const openable = !isDir && isTextDocument(entry.name)
   const stop = (e: MouseEvent, fn: () => void) => {

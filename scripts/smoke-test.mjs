@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { cp, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { cp, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -190,6 +190,40 @@ try {
   assert.equal(await readFile(join(workspaceRoot, scripted.path), 'utf8'), sceneOriginal)
   passed.push('screenplay: typed shelf, stable scene paths, stale reorder/write/restore rejection, history, ordered Markdown and TXT export')
 
+  assert.equal((await rpc('load_storyboard', { workspaceRoot })).revision, null)
+  const shotDraft = { scenePath: scripted.path, title: '月台远景', action: '镜头越过空荡的站台。', dialogue: '远处传来列车声。', framing: 'wide', cameraMove: 'pan', duration: 6, assetIds: [] }
+  let board = await rpc('save_storyboard_shot', { workspaceRoot, revision: null, shot: shotDraft })
+  const firstShot = board.shots[0].id
+  const oldBoardRevision = board.revision
+  board = await rpc('save_storyboard_shot', { workspaceRoot, revision: board.revision, shot: { ...shotDraft, title: '手中车票', framing: 'close_up', duration: 3 } })
+  const boardPath = join(workspaceRoot, 'creative/storyboard.json')
+  const beforeConflict = await readFile(boardPath, 'utf8')
+  await assert.rejects(rpc('save_storyboard_shot', { workspaceRoot, revision: oldBoardRevision, shot: shotDraft }), /修改/)
+  const shotIds = board.shots.map(shot => shot.id)
+  await assert.rejects(rpc('reorder_storyboard_shots', { workspaceRoot, revision: board.revision, expectedIds: shotIds, ids: [firstShot, firstShot] }), /全部镜头/)
+  assert.equal(await readFile(boardPath, 'utf8'), beforeConflict)
+  board = await rpc('reorder_storyboard_shots', { workspaceRoot, revision: board.revision, expectedIds: shotIds, ids: [...shotIds].reverse() })
+  const fixtureImage = await readFile(join(root, 'src-tauri/icons/32x32.png'))
+  board = await rpc('import_storyboard_image', { workspaceRoot, revision: board.revision, shotId: firstShot, role: 'location', name: '月台光线参考', originalName: '站台.png', base64: fixtureImage.toString('base64') })
+  const reference = board.assets[0]
+  assert.equal(reference.available, true)
+  assert.equal(reference.width, 32)
+  assert.deepEqual(await readFile(join(workspaceRoot, reference.path)), fixtureImage)
+  assert.deepEqual(board.shots.find(shot => shot.id === firstShot).assetIds, [reference.id])
+  assert.equal((await rpc('read_creative_image', { workspaceRoot, id: reference.id })).mime, 'image/png')
+  await assert.rejects(rpc('write_text', { workspaceRoot, path: 'creative/storyboard.json', content: '{}' }), /分镜与素材工具管理/)
+  await assert.rejects(rpc('delete_entry', { workspaceRoot, path: reference.path }), /分镜与素材工具管理/)
+  await assert.rejects(rpc('rename_entry', { workspaceRoot, from: reference.path, to: 'creative/references/renamed.png' }), /分镜与素材工具管理/)
+  const boardExport = await rpc('save_storyboard_export', { workspaceRoot, revision: board.revision })
+  const shotSheet = await readFile(join(workspaceRoot, boardExport), 'utf8')
+  assert.ok(shotSheet.indexOf('手中车票') < shotSheet.indexOf('月台远景'))
+  assert.ok(shotSheet.includes(`../${reference.path}`))
+  const beforeInvalidImport = await readdir(join(workspaceRoot, 'creative/references'))
+  await assert.rejects(rpc('import_storyboard_image', { workspaceRoot, revision: board.revision, shotId: null, role: 'reference', name: '伪装图', originalName: 'bad.png', base64: Buffer.from('<svg></svg>').toString('base64') }), /图片|PNG/)
+  assert.deepEqual(await readdir(join(workspaceRoot, 'creative/references')), beforeInvalidImport)
+  await assert.rejects(rpc('load_storyboard'), /workspaceRoot/)
+  passed.push('storyboard: shots/order, stale-write rejection, local validated image import/preview and ordered export')
+
   mode = 'script-agent'
   await rpc('chat_generate_stream', { streamId: 'script-agent', workspaceRoot, providerId: 'smoke-local', messages: [{ role: 'user', content: '读场次和分场大纲，再给开场建议。' }] })
   await waitFor(() => events.some((event) => event.event === 'ai_stream_done' && event.payload.streamId === 'script-agent'), 'screenplay Agent completion')
@@ -216,6 +250,31 @@ try {
   assert.deepEqual((await rpc('list_screenplay_scenes', { workspaceRoot: restoredScript })).map((scene) => scene.path), reversed)
   assert.equal(await rpc('read_history_snapshot', { workspaceRoot: restoredScript, id: sceneSnapshot.id }), sceneOriginal)
   passed.push('forced restart preserves settings/session; copying whole novel and screenplay directories restores manuscript, order and history')
+  const copiedBoard = await rpc('load_storyboard', { workspaceRoot: restoredScript })
+  assert.deepEqual(copiedBoard, board)
+  assert.equal((await rpc('read_creative_image', { workspaceRoot: restoredScript, id: reference.id })).mime, 'image/png')
+  for (const command of ['load_storyboard', 'save_storyboard_shot', 'remove_storyboard_shot', 'reorder_storyboard_shots', 'import_storyboard_image', 'detach_storyboard_asset', 'read_creative_image', 'save_storyboard_export']) {
+    await assert.rejects(rpc(command, { workspaceRoot }), /切换|不匹配/)
+  }
+  const copyBoardPath = join(restoredScript, 'creative/storyboard.json')
+  const copiedRaw = await readFile(copyBoardPath, 'utf8')
+  await writeFile(copyBoardPath, '{broken')
+  await assert.rejects(rpc('load_storyboard', { workspaceRoot: restoredScript }), /损坏/)
+  await assert.rejects(rpc('save_storyboard_shot', { workspaceRoot: restoredScript, revision: copiedBoard.revision, shot: shotDraft }), /损坏/)
+  assert.equal(await readFile(copyBoardPath, 'utf8'), '{broken')
+  await writeFile(copyBoardPath, copiedRaw)
+  await rm(join(restoredScript, reference.path))
+  const missingReference = await rpc('load_storyboard', { workspaceRoot: restoredScript })
+  assert.equal(missingReference.assets[0].available, false)
+  assert.deepEqual(missingReference.shots, copiedBoard.shots)
+  await assert.rejects(rpc('read_creative_image', { workspaceRoot: restoredScript, id: reference.id }), /丢失|移动/)
+  const detached = await rpc('detach_storyboard_asset', { workspaceRoot: restoredScript, revision: missingReference.revision, id: reference.id })
+  assert.equal(detached.assets.length, 0)
+  assert.deepEqual(detached.shots.find(shot => shot.id === firstShot).assetIds, [])
+  // Edits in the copied project cannot touch the source or its manuscript.
+  assert.deepEqual(await readFile(join(workspaceRoot, reference.path)), fixtureImage)
+  assert.equal(await readFile(join(workspaceRoot, scripted.path), 'utf8'), sceneOriginal)
+  passed.push('storyboard: whole-project copy/restart, cross-workspace RPC rejection, corrupt manifests and missing asset safety')
   console.log(JSON.stringify({ passed, notCovered: ['real paid model/network', 'desktop installer UI and OS upgrade', 'long-duration writing and disk-failure recovery'], result: 'pass' }, null, 2))
 } catch (error) {
   console.error(error.stack)

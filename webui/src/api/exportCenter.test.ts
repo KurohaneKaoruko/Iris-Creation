@@ -191,27 +191,31 @@ describe('备份快照报告', () => {
     expect(a).toBe('2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824')
   })
 
-  it('isBackupExcluded 只拦 exports/ 前缀（备份落点），.novel/ 照常纳入', () => {
+  it('排除导出产物和清单无法校验的二进制参考图；.novel/ 照常纳入', () => {
     expect(isBackupExcluded('exports/书-全文-20260101-0000.md')).toBe(true)
     expect(isBackupExcluded('exports\\backups\\x.md')).toBe(true)
+    expect(isBackupExcluded('creative/references/source.png')).toBe(true)
+    expect(isBackupExcluded('creative/storyboard.json')).toBe(false)
     expect(isBackupExcluded('exports-other/x.md')).toBe(false)
     expect(isBackupExcluded('.novel/.settings/chapters.json')).toBe(false)
     expect(isBackupExcluded('stories/chapter-0001.md')).toBe(false)
   })
 
-  it('collectBackupFiles 收集文件、排除 exports/、按路径排序', () => {
+  it('collectBackupFiles 收集文本，排除导出与参考原图并按路径排序', () => {
     const tree = {
       path: 'w',
       kind: 'dir',
       children: [
         { path: 'stories', kind: 'dir', children: [{ path: 'stories/chapter-0002.md', kind: 'file' }, { path: 'stories/chapter-0001.md', kind: 'file' }] },
         { path: 'exports', kind: 'dir', children: [{ path: 'exports/old.md', kind: 'file' }] },
+        { path: 'creative', kind: 'dir', children: [{ path: 'creative/storyboard.json', kind: 'file' }, { path: 'creative/references', kind: 'dir', children: [{ path: 'creative/references/source.png', kind: 'file' }] }] },
         { path: '.novel', kind: 'dir', children: [{ path: '.novel/.settings/chapters.json', kind: 'file' }] },
         { path: 'README.md', kind: 'file' },
       ],
     }
     expect(collectBackupFiles(tree)).toEqual([
       '.novel/.settings/chapters.json',
+      'creative/storyboard.json',
       'README.md',
       'stories/chapter-0001.md',
       'stories/chapter-0002.md',

@@ -11,7 +11,7 @@
 use crate::event_sink::{BroadcastEventSink, SharedEventSink};
 use crate::state::AppState;
 use axum::{
-  extract::{Path, State, WebSocketUpgrade},
+  extract::{DefaultBodyLimit, Path, State, WebSocketUpgrade},
   http::{HeaderMap, StatusCode},
   response::IntoResponse,
   routing::{get, post},
@@ -136,6 +136,9 @@ async fn prepare(config: ServerConfig) -> Result<(tokio::net::TcpListener, Route
     .route("/api/rpc/{command}", post(rpc))
     .route("/ws", get(ws_upgrade))
     .fallback_service(serve_frontend)
+    // A PNG compressed to JSON/base64 expands by about one third; media import is
+    // additionally bounded and magic-checked by its RPC before any bytes are stored.
+    .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
     .with_state(ctx)
     // 静态资源缓存策略：HTML/杂项快速 revalidate，带哈希的 /assets/ 长缓存
     .layer(axum::middleware::from_fn(

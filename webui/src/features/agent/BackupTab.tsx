@@ -85,7 +85,7 @@ export function BackupTab() {
           <div className="bkp-title">工程文件校验清单（非完整备份）</div>
           <div className="bkp-desc">
             为扫描到的工程文本文件生成清单：逐文件记录字数、大小与 SHA-256 校验值，写入 <code>exports/backups/</code>。
-            此报告不包含正文副本，不能用于恢复丢失的文件。完整备份请先保存并关闭作品，再将整个作品目录复制到其他磁盘或备份服务。
+            此报告不包含正文副本，不能用于恢复丢失的文件；也不包含二进制参考图校验。完整备份请先保存并关闭作品，再将包含 <code>creative/</code> 与 <code>.novel/</code> 的整个作品目录复制到其他磁盘。
           </div>
         </div>
       </div>

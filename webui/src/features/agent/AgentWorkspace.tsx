@@ -25,6 +25,7 @@ import { PromptDialog, ConfirmDialog } from '../workspace/Dialogs'
 import { SettingsDialog } from './SettingsDialog'
 import { ToolsDialog, type ToolsTab } from './ToolsDialog'
 import { StudioDialog } from './StudioDialog'
+import { StoryboardDialog } from './StoryboardDialog'
 import { ChaptersPanel } from './ChaptersPanel'
 import { NewSceneDialog, ScenePanel } from './ScenePanel'
 import { LorePanel } from './LorePanel'
@@ -96,6 +97,7 @@ export function AgentWorkspace() {
   const [toolsOpen, setToolsOpen] = useState(false)
   const [toolsTab, setToolsTab] = useState<ToolsTab>(screenplay ? 'search' : 'planner')
   const [studioOpen, setStudioOpen] = useState(false)
+  const [storyboardOpen, setStoryboardOpen] = useState(false)
   const [studioToolId, setStudioToolId] = useState<string | null>(null)
   /** 编辑器选中文本（选中时显示浮动工坊按钮） */
   const [selection, setSelection] = useState('')
@@ -431,7 +433,7 @@ export function AgentWorkspace() {
   // 独立的文件与命令入口；弹层内 Escape 不穿透退出专注写作。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.isComposing || settingsOpen || toolsOpen || studioOpen || dialog || pendingGuard) return
+      if (e.defaultPrevented || e.isComposing || settingsOpen || toolsOpen || studioOpen || storyboardOpen || dialog || pendingGuard) return
       if (e.key === 'Escape' && focusMode) {
         setFocusMode(false)
         return
@@ -448,13 +450,14 @@ export function AgentWorkspace() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [focusMode, settingsOpen, toolsOpen, studioOpen, dialog, pendingGuard])
+  }, [focusMode, settingsOpen, toolsOpen, studioOpen, storyboardOpen, dialog, pendingGuard])
 
   const paletteCommands = useMemo(() => ([
     { id: 'new-session', icon: 'plus', label: '新建会话', hint: 'Ctrl+K 后回车', run: () => guardUnsavedAction('新建会话', newSession) },
     { id: 'quick-open', icon: 'search', label: '快速打开文件', hint: 'Ctrl+P', keywords: 'file open 文件 章节 标题 path', run: () => setQuickOpen({ query: '' }) },
     { id: 'new-chapter', icon: screenplay ? 'clapperboard' : 'file-plus', label: screenplay ? '新建场次' : '新建章节', keywords: 'scene chapter 写作', run: () => setDialog({ kind: screenplay ? 'new-scene' : 'new-chapter' }) },
     ...(screenplay ? [{ id: 'scenes', icon: 'list-checks' as const, label: '显示场次列表', keywords: 'screenplay 分场', run: () => { setPanelOpen(true); setPanelTab('chapters') } }] : []),
+    ...(screenplay ? [{ id: 'storyboard', icon: 'clapperboard' as const, label: '分镜与素材', keywords: 'storyboard 镜头 图片 人物 场景 道具', run: () => setStoryboardOpen(true) }] : []),
     { id: 'new-file', icon: 'file-plus', label: '新建 Markdown 文件', keywords: 'file create', run: () => setDialog({ kind: 'new-file' }) },
     { id: 'new-dir', icon: 'folder-plus', label: '新建目录', keywords: 'folder mkdir', run: () => setDialog({ kind: 'new-dir' }) },
     { id: 'studio', icon: 'sparkles', label: screenplay ? '剧本工坊' : '创作工坊', keywords: 'studio 工坊 创作 头脑风暴 场景 对话 润色 翻译 摘要', run: () => openStudio() },
@@ -641,6 +644,7 @@ export function AgentWorkspace() {
         <button className="agw-iconbtn agw-studio-toggle" onClick={() => openStudio()} title={screenplay ? '剧本工坊' : '创作工坊'}>
           <Icon name="sparkles" size={16} />
         </button>
+        {screenplay ? <button className="agw-iconbtn" title="分镜与素材" onClick={() => setStoryboardOpen(true)}><Icon name="clapperboard" size={17} /></button> : null}
         <button className="agw-iconbtn" onClick={() => setToolsOpen(true)} title="工具中心">
           <Icon name="wrench" size={17} />
         </button>
@@ -691,7 +695,7 @@ export function AgentWorkspace() {
                   <FileTree
                      entry={tree}
                      activePath={activePath}
-                     canManage={(path) => !screenplay || !/^scenes\//i.test(path)}
+                     canManage={(path) => !screenplay || !/^(?:scenes\/|creative(?:\/|$))/i.test(path)}
                     onOpen={(p) => {
                       navigateToPath(p)
                     }}
@@ -713,7 +717,7 @@ export function AgentWorkspace() {
               screenplay && workRoot ? <ScenePanel workspace={workRoot} scenes={scenes} activePath={activePath} loading={indexBusy} loadError={sceneListError}
                 onOpen={navigateToPath} onNew={() => setDialog({ kind: 'new-scene' })} onRefresh={refreshTree}
                 onExport={() => { setToolsTab('export'); setToolsOpen(true) }} onOutline={() => navigateToPath('outline/outline.md')}
-                onCharacters={() => navigateToPath('concept/characters.md')} /> : <ChaptersPanel
+                onCharacters={() => navigateToPath('concept/characters.md')} onStoryboard={() => setStoryboardOpen(true)} /> : <ChaptersPanel
                 activePath={activePath}
                 onOpen={(p) => {
                   navigateToPath(p)
@@ -1003,6 +1007,8 @@ export function AgentWorkspace() {
           }}
         />
       ) : null}
+      {storyboardOpen && screenplay && workRoot ? <StoryboardDialog workspace={workRoot} initialScene={activePath}
+        onClose={() => { setStoryboardOpen(false); void refreshTree() }} onOpenScene={navigateToPath} /> : null}
     </div>
   )
 }

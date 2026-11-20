@@ -120,16 +120,16 @@ export async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-/** 备份应跳过的路径：导出产物与备份自身（防自吞递增）；其余 .novel/ 状态照常纳入 */
+/** 文本清单跳过导出产物和二进制参考图；完整备份需整目录复制。 */
 export function isBackupExcluded(path: string): boolean {
   const p = path.replace(/\\/g, '/')
-  return p.startsWith('exports/')
+  return p.startsWith('exports/') || p.startsWith('creative/references/')
 }
 
 /** 树节点最小结构（collectBackupFiles 只需 path/kind/children） */
 type BackupNode = { path: string; kind: string; children?: BackupNode[] }
 
-/** 从工作区文件树收集纳入备份的文件相对路径（排除 exports/，其余全量）。
+/** 从工作区文件树收集文本清单路径（排除导出和二进制参考图）。
  * 纯函数：只读树，不做 IO。 */
 export function collectBackupFiles(tree: BackupNode): string[] {
   const out: string[] = []
@@ -162,8 +162,8 @@ export function assembleBackupReport(opts: {
     '',
     `> 快照时间：${time} · 文件 ${files.length} 个 · 总字数 ${totalWords.toLocaleString()} · 总大小 ${fmtBytes(totalBytes)}`,
     '>',
-    '> 本报告为文本清单式备份：逐文件记录字数与 SHA-256，可用于核对内容是否被改动。',
-    '> 正文与设定的完整内容以本工程目录为准；建议定期用系统工具对整个目录做冷备份。',
+    '> 本报告为文本清单式备份：逐文件记录字数与 SHA-256，可用于核对文件内容；不含文件副本或二进制参考图校验。',
+    '> 此报告不包含正文副本，不能用于恢复丢失的文件。完整备份须复制整个作品目录（含 creative/ 与 .novel/）。',
     '',
   ]
 
