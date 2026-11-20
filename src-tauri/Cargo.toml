@@ -1,6 +1,6 @@
 [package]
 name = "iris-creation"
-version = "0.1.1-rc.5"
+version = "0.1.1-rc.6"
 description = "Iris-Creation"
 authors = ["you"]
 edition = "2021"
