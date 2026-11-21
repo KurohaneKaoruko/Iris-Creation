@@ -116,6 +116,8 @@ export function AgentWorkspace() {
   const editingRef = useRef(editing)
   const fileContentRef = useRef(fileContent)
   const saveInFlight = useRef(false)
+  const draftStateRef = useRef({ workRoot, path: activePath, baseContent: '', draft: '', editing: false })
+  const storageWarningRef = useRef(false)
   editingRef.current = editing
   fileContentRef.current = fileContent
   const hasUnsavedChanges = editing && editDraft !== draftBaselineRef.current
@@ -124,6 +126,28 @@ export function AgentWorkspace() {
   const isActiveScene = screenplay && isScenePath(activePath)
   const studioCanEdit = !!activePath && canBeginEdit && !saving
 
+  // Capture only committed document state: an old document's effect cleanup must
+  // flush its own draft before a newly selected document takes ownership.
+  useEffect(() => {
+    draftStateRef.current = { workRoot, path: activePath, baseContent: draftBaselineRef.current, draft: editDraft, editing }
+  })
+
+  const flushEditorDraft = useCallback(() => {
+    const snapshot = draftStateRef.current
+    if (!snapshot.editing || !snapshot.path || snapshot.draft === snapshot.baseContent) return true
+    try {
+      localStorage.setItem(editorDraftKey(snapshot.workRoot ?? '', snapshot.path), JSON.stringify({
+        baseContent: snapshot.baseContent, draft: snapshot.draft, savedAt: Date.now(),
+      }))
+      storageWarningRef.current = false
+      return true
+    } catch {
+      if (!storageWarningRef.current) setError('本机草稿暂存失败；当前正文仍在编辑器中，请先保存到工程或复制内容后再关闭。')
+      storageWarningRef.current = true
+      return false
+    }
+  }, [setError])
+
   const openStudio = useCallback((toolId: string | null = null) => {
     setStudioToolId(toolId)
     setStudioOpen(true)
@@ -131,12 +155,13 @@ export function AgentWorkspace() {
 
   const guardUnsavedAction = useCallback((description: string, action: () => void) => {
     if (saveInFlight.current) return
-    if (hasUnsavedChanges) {
+    const snapshot = draftStateRef.current
+    if (snapshot.editing && snapshot.draft !== snapshot.baseContent) {
       setPendingGuard({ description, action })
       return
     }
     action()
-  }, [hasUnsavedChanges])
+  }, [])
 
   const navigateToPath = useCallback((path: string, location?: SearchLocation) => {
     if (path === activePath) {
@@ -180,17 +205,21 @@ export function AgentWorkspace() {
   }
 
   useEffect(() => {
-    if (!hasUnsavedChanges) return
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (activePath) {
-        try { localStorage.setItem(editorDraftKey(workRoot ?? '', activePath), JSON.stringify({ baseContent: draftBaselineRef.current, draft: editDraft, savedAt: Date.now() })) } catch { /* storage unavailable */ }
-      }
+      const snapshot = draftStateRef.current
+      if (!snapshot.editing || snapshot.draft === snapshot.baseContent) return
+      flushEditorDraft()
       event.preventDefault()
       event.returnValue = ''
     }
+    const onPageHide = () => { flushEditorDraft() }
     window.addEventListener('beforeunload', warnBeforeUnload)
-    return () => window.removeEventListener('beforeunload', warnBeforeUnload)
-  }, [hasUnsavedChanges, activePath, workRoot, editDraft])
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      window.removeEventListener('beforeunload', warnBeforeUnload)
+      window.removeEventListener('pagehide', onPageHide)
+    }
+  }, [flushEditorDraft])
 
   const refreshTree = useCallback(async () => {
     if (!workRoot) return
@@ -341,8 +370,9 @@ export function AgentWorkspace() {
     return () => {
       alive = false
       controller.abort()
+      flushEditorDraft()
     }
-  }, [activePath, fileLoadAttempt, workRoot, setError])
+  }, [activePath, fileLoadAttempt, workRoot, setError, flushEditorDraft])
 
   useEffect(() => {
     if (!editing || !activePath) return
@@ -352,12 +382,10 @@ export function AgentWorkspace() {
       return
     }
     const timer = window.setTimeout(() => {
-      try {
-        localStorage.setItem(key, JSON.stringify({ baseContent: draftBaselineRef.current, draft: editDraft, savedAt: Date.now() }))
-      } catch { /* local storage full/private mode: in-memory editing remains available */ }
+      flushEditorDraft()
     }, 700)
     return () => window.clearTimeout(timer)
-  }, [editing, editDraft, activePath, workRoot])
+  }, [editing, editDraft, activePath, workRoot, flushEditorDraft])
 
   // Agent 提到文件 / 写文件 → 面板亮起
   useEffect(() => {
@@ -603,6 +631,7 @@ export function AgentWorkspace() {
       setDiskConflict(null)
       setExternalChange(null)
       draftBaselineRef.current = editDraft
+      draftStateRef.current = { workRoot, path: activePath, baseContent: editDraft, draft: editDraft, editing: false }
       try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch { /* storage disabled */ }
       setEditing(false)
       void refreshTree()
@@ -739,7 +768,7 @@ export function AgentWorkspace() {
                           <>
                             <span className={`agw-save-state ${hasUnsavedChanges ? 'dirty' : 'saved'}`}>{hasUnsavedChanges ? '未保存' : '已保存'}</span>
                             <button className="agw-btn primary" disabled={saving} onClick={() => void saveEdit()}>{saving ? '保存中…' : '保存'}</button>
-                            <button className="agw-btn" disabled={saving} onClick={() => guardUnsavedAction('放弃未保存修改', () => { try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch {} setEditDraft(fileContent); setEditing(false) })}>取消</button>
+                            <button className="agw-btn" disabled={saving} onClick={() => guardUnsavedAction('放弃未保存修改', () => { draftStateRef.current.editing = false; try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch {} setEditDraft(fileContent); setEditing(false) })}>取消</button>
                           </>
                         ) : previewMode === 'content' ? (
                           <>
@@ -765,7 +794,8 @@ export function AgentWorkspace() {
                         <button disabled={saving} onClick={() => {
                           setFileContent(diskConflict.content)
                           setEditDraft(diskConflict.content)
-                          draftBaselineRef.current = diskConflict.content
+                           draftBaselineRef.current = diskConflict.content
+                           draftStateRef.current = { workRoot, path: activePath, baseContent: diskConflict.content, draft: diskConflict.content, editing: false }
                           setDiskConflict(null)
                           setEditing(false)
                           try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch { /* storage disabled */ }
@@ -818,7 +848,10 @@ export function AgentWorkspace() {
                               aria-label={isActiveScene ? '场次编辑器' : '正文编辑器'}
                               disabled={saving}
                               value={editDraft}
-                              onChange={(e) => setEditDraft(e.target.value)}
+                              onChange={(e) => {
+                                draftStateRef.current = { workRoot, path: activePath, baseContent: draftBaselineRef.current, draft: e.target.value, editing: true }
+                                setEditDraft(e.target.value)
+                              }}
                                onKeyDown={(e) => {
                                  if (e.nativeEvent.isComposing || e.keyCode === 229) return
                                 if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
@@ -946,6 +979,7 @@ export function AgentWorkspace() {
               <button className="dialog-btn danger" disabled={saving} onClick={() => {
                 const action = pendingGuard.action
                 setPendingGuard(null)
+                draftStateRef.current.editing = false
                 if (activePath) { try { localStorage.removeItem(editorDraftKey(workRoot ?? '', activePath)) } catch {} }
                 setEditing(false)
                 setEditDraft(fileContent)

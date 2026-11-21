@@ -69,4 +69,20 @@ describe('MarkdownView 锚点渲染', () => {
   it('does not merge ordered and unordered lists or swallow a following horizontal rule', () => {
     expect(markdownBlocks('1. first\n- next\n\nparagraph\n---').map((block) => block.kind)).toEqual(['list', 'list', 'paragraph', 'rule'])
   })
+
+  it('marks a hit inside a fenced code block on its real source line', () => {
+    const content = '# 标题\n\n```md\n# 钥匙在围栏里\n```\n\n结尾'
+    const holder = document.createElement('div')
+    holder.innerHTML = renderToStaticMarkup(<MarkdownView content={content} location={{ line: 4, query: '钥匙', caseSensitive: false }} />)
+    expect(holder.querySelectorAll('mark')).toHaveLength(1)
+    expect(holder.querySelector('pre [data-source-line="4"] mark')?.textContent).toBe('钥匙')
+    expect(holder.querySelector('.mdv-source-target[data-source-line="4"]')?.textContent).toContain('# 钥匙在围栏里')
+  })
+
+  it('keeps the target line without marking unrelated text when the hit is stale', () => {
+    const html = renderToStaticMarkup(<MarkdownView content={'一\n旧词已删\n三'} location={{ line: 2, query: '钥匙', caseSensitive: false }} />)
+    expect(html).not.toContain('<mark')
+    expect(html).toContain('mdv-source-target')
+    expect(html).toContain('旧词已删')
+  })
 })

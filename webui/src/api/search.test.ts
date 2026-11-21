@@ -185,6 +185,13 @@ describe('matchInContent（单文件匹配）', () => {
   it('空查询返回空', () => {
     expect(matchInContent('f.md', '任意', '  ')).toEqual([])
   })
+
+  it('围栏代码块内的命中照常按真实源行报告', () => {
+    const content = '# 标题\n\n```\n钥匙在围栏内\n```'
+    const hits = matchInContent('f.md', content, '钥匙')
+    expect(hits).toHaveLength(1)
+    expect(hits[0].line).toBe(4)
+  })
 })
 
 describe('searchFiles（分批搜索）', () => {
@@ -294,6 +301,20 @@ describe('locateSearchMatch', () => {
   })
   it('clamps deleted/out-of-range lines to a safe caret', () => {
     expect(locateSearchMatch('one\ntwo', { line: 20, query: 'two', caseSensitive: false })).toEqual({ line: 2, start: 4, end: 4, matched: false })
+  })
+  it('clamps a non-positive line request to line 1', () => {
+    expect(locateSearchMatch('只剩一行', { line: 0, query: 'x', caseSensitive: false })).toEqual({ line: 1, start: 0, end: 0, matched: false })
+  })
+  it('selects the occurrence on the requested line when identical headings repeat', () => {
+    const content = '# 山巅\n一\n## 山巅\n二'
+    const first = locateSearchMatch(content, { line: 1, query: '山巅', caseSensitive: false })
+    const second = locateSearchMatch(content, { line: 3, query: '山巅', caseSensitive: false })
+    expect(content.slice(first.start, first.end)).toBe('山巅')
+    expect(content.slice(second.start, second.end)).toBe('山巅')
+    expect(second.start).toBe(content.indexOf('山巅', first.end))
+  })
+  it('collapses to the line start without selecting text for a blank query', () => {
+    expect(locateSearchMatch('一\n二', { line: 2, query: '   ', caseSensitive: false })).toEqual({ line: 2, start: 2, end: 2, matched: false })
   })
 })
 

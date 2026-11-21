@@ -7,6 +7,7 @@ import { editorDraftKey } from '../../api/editorDraft'
 
 const state = vi.hoisted(() => ({
   disk: '# 正文\n原稿',
+  activePath: 'stories/one.md',
   readText: vi.fn(), write: vi.fn(), closeWork: vi.fn(), setError: vi.fn(),
   setActivePath: vi.fn(), events: new Map<string, (value: unknown) => void>(),
   chat: { messages: [], busy: false, send: vi.fn(), clear: vi.fn(), restore: vi.fn(), cancel: vi.fn(), resendFrom: vi.fn() },
@@ -31,7 +32,7 @@ vi.mock('../../api/rpc', async (original) => ({
 vi.mock('../../hooks/useChat', () => ({ useChat: () => state.chat }))
 vi.mock('../../state/ThemeContext', () => ({ useTheme: () => ({ theme: 'dark', toggleTheme: vi.fn() }) }))
 vi.mock('../../state/ProjectContext', () => ({ useProject: () => ({
-  workRoot: '/test-work', workName: '测试作品', activePath: 'stories/one.md',
+  workRoot: '/test-work', workName: '测试作品', activePath: state.activePath,
   setActivePath: state.setActivePath, setError: state.setError, closeWork: state.closeWork,
 }) }))
 
@@ -64,6 +65,7 @@ beforeEach(async () => {
   vi.useFakeTimers()
   vi.clearAllMocks()
   state.disk = '# 正文\n原稿'
+  state.activePath = 'stories/one.md'
   state.readText.mockImplementation(async () => state.disk)
   state.write.mockImplementation(async (_path: string, value: string, expected: string) => {
     if (expected !== state.disk) throw new Error('file changed on disk')
@@ -80,6 +82,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
+  vi.restoreAllMocks()
   vi.useRealTimers()
 })
 
@@ -152,6 +155,112 @@ describe('editor safety interactions', () => {
     expect(localStorage.getItem(key)).toBeNull()
   })
 
+  it('flushes the latest draft on unmount before the debounce runs', async () => {
+    await edit('刚输入、尚未防抖暂存的草稿')
+    const key = editorDraftKey('/test-work', 'stories/one.md')
+    expect(localStorage.getItem(key)).toBeNull()
+    await act(async () => root.unmount())
+    expect(JSON.parse(localStorage.getItem(key)!)).toMatchObject({
+      baseContent: '# 正文\n原稿', draft: '刚输入、尚未防抖暂存的草稿',
+    })
+    root = createRoot(container)
+    await act(async () => root.render(<AgentWorkspace />))
+    await click('预览')
+    expect(container.textContent).toContain('找到未保存的本地草稿')
+  })
+
+  it('stashes same-event input on beforeunload and still warns before closing', async () => {
+    const editor = await edit('上一帧草稿')
+    const event = new Event('beforeunload', { cancelable: true })
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(editor, '最后一次输入')
+      editor.dispatchEvent(new Event('input', { bubbles: true }))
+      window.dispatchEvent(event)
+    })
+    expect(event.defaultPrevented).toBe(true)
+    expect(JSON.parse(localStorage.getItem(editorDraftKey('/test-work', 'stories/one.md'))!).draft).toBe('最后一次输入')
+    expect(state.write).not.toHaveBeenCalled()
+  })
+
+  it('stashes a draft on pagehide even when no unload confirmation is shown', async () => {
+    await edit('页面隐藏前的草稿')
+    await act(async () => window.dispatchEvent(new Event('pagehide')))
+    expect(JSON.parse(localStorage.getItem(editorDraftKey('/test-work', 'stories/one.md'))!).draft).toBe('页面隐藏前的草稿')
+    expect(state.write).not.toHaveBeenCalled()
+  })
+
+  it('does not close the project after a failed save and keeps the draft available', async () => {
+    await edit('写入失败仍要保留')
+    state.write.mockRejectedValueOnce(new Error('permission denied'))
+    await click('关闭工程')
+    await click('保存并继续')
+    expect(state.closeWork).not.toHaveBeenCalled()
+    expect(container.querySelector('[role="alertdialog"]')).not.toBeNull()
+    expect(state.disk).toBe('# 正文\n原稿')
+    expect(state.setError).toHaveBeenCalledWith(expect.stringContaining('permission denied'))
+    await click('继续编辑')
+    expect(container.querySelector<HTMLTextAreaElement>('[aria-label="正文编辑器"]')?.value).toBe('写入失败仍要保留')
+  })
+
+  it('does not resurrect an explicitly discarded draft during unmount', async () => {
+    await edit('明确放弃的草稿')
+    await act(async () => { await vi.advanceTimersByTimeAsync(750) })
+    const key = editorDraftKey('/test-work', 'stories/one.md')
+    expect(localStorage.getItem(key)).not.toBeNull()
+    await click('关闭工程')
+    await click('放弃修改')
+    await act(async () => root.unmount())
+    expect(localStorage.getItem(key)).toBeNull()
+    expect(state.disk).toBe('# 正文\n原稿')
+    root = createRoot(container)
+    await act(async () => root.render(<AgentWorkspace />))
+    expect(container.textContent).not.toContain('找到未保存的本地草稿')
+  })
+
+  it('does not recreate recovery data after a successful save and unmount', async () => {
+    await edit('已保存的新正文')
+    await click('保存')
+    await act(async () => root.unmount())
+    expect(localStorage.getItem(editorDraftKey('/test-work', 'stories/one.md'))).toBeNull()
+    expect(state.disk).toBe('已保存的新正文')
+    root = createRoot(container)
+    await act(async () => root.render(<AgentWorkspace />))
+    expect(container.textContent).not.toContain('找到未保存的本地草稿')
+  })
+
+  it('ignores a late read after switching rapidly back to the original file', async () => {
+    let finishRead!: (text: string) => void
+    state.readText.mockImplementation((path: string) => path === 'stories/two.md'
+      ? new Promise<string>((resolve) => { finishRead = resolve }) : Promise.resolve(state.disk))
+    state.activePath = 'stories/two.md'
+    await act(async () => root.render(<AgentWorkspace />))
+    state.activePath = 'stories/one.md'
+    await act(async () => root.render(<AgentWorkspace />))
+    await click('预览')
+    await act(async () => finishRead('另一个文件的迟到响应'))
+    expect(container.querySelector('.mdv')?.textContent).toContain('原稿')
+    expect(container.querySelector('.mdv')?.textContent).not.toContain('迟到响应')
+    await click('编辑')
+    expect(container.querySelector<HTMLTextAreaElement>('[aria-label="正文编辑器"]')?.value).toBe(state.disk)
+  })
+
+  it('warns when recovery storage fails without losing the editable text', async () => {
+    const original = Storage.prototype.setItem
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key, value) {
+      if (key.startsWith('iris-editor-draft:')) throw new Error('quota exceeded')
+      original.call(this, key, value)
+    })
+    const editor = await edit('缓存不可用也必须保留的正文')
+    await act(async () => { await vi.advanceTimersByTimeAsync(750) })
+    expect(state.setError).toHaveBeenCalledWith(expect.stringContaining('本机草稿暂存失败'))
+    expect(editor.value).toBe('缓存不可用也必须保留的正文')
+    const event = new Event('beforeunload', { cancelable: true })
+    await act(async () => window.dispatchEvent(event))
+    expect(event.defaultPrevented).toBe(true)
+    await click('保存')
+    expect(state.disk).toBe('缓存不可用也必须保留的正文')
+  })
+
   it('keeps an on-screen exit button in focus mode', async () => {
     await click('专注写作')
     expect(container.querySelector('.agw-focus-mode')).not.toBeNull()
@@ -202,6 +311,88 @@ describe('editor safety interactions', () => {
     expect(editor.selectionStart).toBe(editor.value.indexOf('原稿二'))
     expect(editor.value).toContain('还未保存')
     expect(state.write).not.toHaveBeenCalled()
+  })
+
+  /** 在挂载前设置磁盘内容并重新挂载（beforeEach 已用默认内容渲染过一次） */
+  async function remountWith(disk: string) {
+    state.disk = disk
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await act(async () => root.render(<AgentWorkspace />))
+  }
+
+  it('locates the second duplicate heading hit on its real source line, not the first', async () => {
+    await remountWith('# 山巅\n开篇\n\n## 山巅\n尾声山巅处')
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true })))
+    await click('全文检索')
+    await typeInput(container.querySelector<HTMLInputElement>('[aria-label="全文检索关键词"]')!, '山巅')
+    await click('搜索')
+    const oneHits = [...container.querySelectorAll<HTMLButtonElement>('.srch-hit')].filter((n) => n.title.startsWith('stories/one.md:'))
+    expect(oneHits.map((node) => node.title)).toEqual(['stories/one.md:1', 'stories/one.md:4', 'stories/one.md:5'])
+    // 预览：第 4 行（第二个同名标题）获得 mdv-source-target，第一个标题没有
+    await act(async () => oneHits[1].click())
+    const target = container.querySelector('.mdv-source-target')
+    expect(target?.getAttribute('data-source-line')).toBe('4')
+    expect(target?.id).toBe('mdv-toc-山巅-1')
+    expect(container.querySelector('#mdv-toc-山巅')?.classList.contains('mdv-source-target')).toBe(false)
+    // 编辑此处：textarea 选中第 4 行的山巅，而不是第 1 行的
+    await click('编辑此处')
+    const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="正文编辑器"]')!
+    expect(editor.value.slice(editor.selectionStart, editor.selectionEnd)).toBe('山巅')
+    expect(editor.selectionStart).toBe(state.disk.indexOf('## 山巅') + 3)
+  })
+
+  it('selects fenced-code hits exactly for editing even when the query also appears in headings', async () => {
+    await remountWith('# 钥匙\n\n```\n钥匙在围栏内\n```\n\n正文')
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true })))
+    await click('全文检索')
+    await typeInput(container.querySelector<HTMLInputElement>('[aria-label="全文检索关键词"]')!, '钥匙')
+    await click('搜索')
+    await act(async () => container.querySelector<HTMLButtonElement>('[title="stories/one.md:4"]')!.click())
+    expect(container.querySelector('pre [data-source-line="4"] mark')?.textContent).toBe('钥匙')
+    await click('编辑此处')
+    const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="正文编辑器"]')!
+    expect(editor.value.slice(editor.selectionStart, editor.selectionEnd)).toBe('钥匙')
+    expect(editor.selectionStart).toBe(state.disk.indexOf('钥匙在围栏内'))
+  })
+
+  it('keeps CRLF source lines consistent from search hits into the editor selection', async () => {
+    await remountWith('# 标题\r\n\r\n开篇钥匙在抽屉\r\n结尾')
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true })))
+    await click('全文检索')
+    await typeInput(container.querySelector<HTMLInputElement>('[aria-label="全文检索关键词"]')!, '钥匙')
+    await click('搜索')
+    // 命中行号按 CRLF 归一后的真实源行（第 3 行）
+    await act(async () => container.querySelector<HTMLButtonElement>('[title="stories/one.md:3"]')!.click())
+    expect(container.querySelector('.mdv-source-target[data-source-line="3"]')?.textContent).toContain('钥匙')
+    await click('编辑此处')
+    const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="正文编辑器"]')!
+    // jsdom 与浏览器一致把 textarea 的 CRLF 归一为 LF：偏移按 LF 文本计算
+    expect(editor.value).toBe('# 标题\n\n开篇钥匙在抽屉\n结尾')
+    expect(editor.value.slice(editor.selectionStart, editor.selectionEnd)).toBe('钥匙')
+  })
+
+  it('moves only the caret to the located line when the stale query no longer exists', async () => {
+    await remountWith('# 标题\n旧词位置\n结尾')
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true })))
+    await click('全文检索')
+    await typeInput(container.querySelector<HTMLInputElement>('[aria-label="全文检索关键词"]')!, '旧词')
+    await click('搜索')
+    // 文件在检索提交后被外部改写，旧词消失
+    state.disk = '# 标题\n这句话已被改写\n结尾'
+    await act(async () => {
+      state.events.get('fs_changed')?.({ path: 'stories/one.md', kind: 'modify' })
+      await vi.advanceTimersByTimeAsync(650)
+    })
+    await act(async () => container.querySelector<HTMLButtonElement>('[title="stories/one.md:2"]')!.click())
+    expect(container.querySelector('.mdv-source-target[data-source-line="2"]')?.textContent).toContain('被改写')
+    // 预览内不得高亮任何无关文字（检索弹层的命中列表不含 mdv 命中标记）
+    expect(container.querySelectorAll('.mdv mark').length).toBe(0)
+    await click('编辑此处')
+    const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="正文编辑器"]')!
+    // 过期命中：只把光标移到第 2 行行首，不选中任何无关文字
+    expect(editor.selectionStart).toBe(editor.selectionEnd)
+    expect(editor.value.indexOf('\n') + 1).toBe(editor.selectionStart)
   })
 
   it('ignores read-only watcher notifications and notices writes in a mixed batch', async () => {
