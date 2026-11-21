@@ -2,10 +2,76 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 static TEXT_WRITE_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
+
+#[cfg(test)]
+#[path = "fs_boundary_tests.rs"]
+mod boundary_tests;
+
+/// Resolve a validated relative path without following links or reparse points.
+/// This is a filesystem safety check, not an OS sandbox for hostile local processes.
+fn checked_workspace_path(root: &Path, relative: &Path) -> Result<PathBuf, String> {
+  let root = fs::canonicalize(root).map_err(|e| format!("invalid workspace: {e}"))?;
+  let mut current = root.clone();
+  for part in relative.components() {
+    current.push(part);
+    match fs::symlink_metadata(&current) {
+      Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+      Err(e) => return Err(format!("检查作品路径失败：{e}")),
+      Ok(meta) => {
+        let linked = meta.file_type().is_symlink();
+        #[cfg(windows)]
+        let linked = linked || {
+          use std::os::windows::fs::MetadataExt;
+          meta.file_attributes() & 0x400 != 0
+        };
+        if linked || (!meta.is_file() && !meta.is_dir()) {
+          return Err("只允许作品内的普通文件和目录，不能通过链接访问。".into());
+        }
+        let resolved = fs::canonicalize(&current).map_err(|e| format!("解析作品路径失败：{e}"))?;
+        if !resolved.starts_with(&root) { return Err("路径越出当前作品目录，操作已拒绝。".into()); }
+      }
+    }
+  }
+  Ok(root.join(relative))
+}
+
+/// Keep generic file actions away from stores managed by dedicated services.
+fn protect_managed_path(relative: &Path) -> Result<(), String> {
+  let parts: Vec<_> = relative.components().map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase()).collect();
+  if parts.first().is_some_and(|part| part == ".git")
+    || (parts.first().is_some_and(|part| part == ".novel")
+      && (parts.len() == 1 || matches!(parts.get(1).map(String::as_str), Some(".history" | "snapshots" | "work.json")))) {
+    return Err("此路径由版本、快照或工程管理服务维护，不能通过普通文件操作修改。".into());
+  }
+  Ok(())
+}
+
+fn read_text_bounded(path: &Path) -> io::Result<String> {
+  let file = fs::File::open(path)?;
+  let meta = file.metadata()?;
+  if !meta.is_file() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "只能读取普通文本文件。")); }
+  if meta.len() > MAX_TEXT_BYTES as u64 {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "普通文本文件超过 16 MiB 上限。"));
+  }
+  let mut content = String::new();
+  file.take(MAX_TEXT_BYTES as u64 + 1).read_to_string(&mut content)?;
+  if content.len() > MAX_TEXT_BYTES {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "普通文本文件超过 16 MiB 上限。"));
+  }
+  Ok(content)
+}
+
+pub(crate) fn read_text_internal(root: &Path, relative_path: &str) -> Result<String, String> {
+  let rel = validate_relative_path(relative_path)?;
+  let target = checked_workspace_path(root, &rel)?;
+  read_text_bounded(&target).map_err(|e| format!("read failed: {e}"))
+}
 
 #[derive(Serialize, Clone)]
 pub struct FsEntry {
@@ -79,9 +145,9 @@ pub(crate) fn update_concept_index(root: &Path, rel_path: &str, content: &str) -
     updated_at: String,
   }
 
-  let index_path = root.join(".novel").join(".cache").join("concept_index.json");
+  let index_path = checked_workspace_path(root, Path::new(".novel/.cache/concept_index.json"))?;
   let mut index: ConceptIndex = if index_path.exists() {
-    let raw = fs::read_to_string(&index_path).unwrap_or_default();
+    let raw = read_text_bounded(&index_path).map_err(|e| format!("read concept index failed: {e}"))?;
     serde_json::from_str(&raw).unwrap_or_default()
   } else {
     ConceptIndex::default()
@@ -108,9 +174,7 @@ pub(crate) fn update_concept_index(root: &Path, rel_path: &str, content: &str) -
     );
   }
 
-  if let Some(parent) = index_path.parent() {
-    fs::create_dir_all(parent).map_err(|e| format!("create concept index dir failed: {e}"))?;
-  }
+  super::workspace::managed_dir(root, &[".novel", ".cache"], true)?;
   let raw = serde_json::to_string_pretty(&index).map_err(|e| format!("serialize concept index failed: {e}"))?;
   fs::write(index_path, raw).map_err(|e| format!("write concept index failed: {e}"))
 }
@@ -355,7 +419,7 @@ pub fn resolve_inline_references(
 
   let root = get_workspace_root(state).ok();
   for reference in file_refs {
-    let normalized_ref = reference.trim_start_matches("./").trim_start_matches('/');
+    let normalized_ref = reference.as_str();
     if normalized_ref.is_empty() {
       continue;
     }
@@ -376,8 +440,9 @@ pub fn resolve_inline_references(
     let Some(root_path) = root.as_ref() else {
       continue;
     };
-    let absolute = root_path.join(relative);
-    match fs::read_to_string(&absolute) {
+    let result = checked_workspace_path(root_path, &relative)
+      .and_then(|path| read_text_bounded(&path).map_err(|e| e.to_string()));
+    match result {
       Ok(content) => push_block(format!("file {normalized_ref}"), content),
       Err(err) => push_block(format!("file {normalized_ref}"), format!("read failed: {err}")),
     }
@@ -426,8 +491,8 @@ pub fn validate_novel_task_quality(
   }
 
   let scope_rel = normalize_rel_path_for_read(task.scope.as_str())?;
-  let scope_path = root.join(scope_rel);
-  let content = fs::read_to_string(&scope_path)
+  let scope_path = checked_workspace_path(&root, &scope_rel)?;
+  let content = read_text_bounded(&scope_path)
     .map_err(|_| format!("target file is missing or unreadable: {}", task.scope))?;
   let compact = normalize_no_whitespace(content.as_str());
   let min_length = std::cmp::max(600usize, ((task.target_words as f32) * 0.42_f32) as usize);
@@ -464,7 +529,8 @@ pub fn validate_novel_task_quality(
     if let Some(dep_task) = payload.task_pool.iter().find(|item| item.id == *dep_id) {
       if dep_task.scope != task.scope {
         if let Ok(dep_rel) = normalize_rel_path_for_read(dep_task.scope.as_str()) {
-          if let Ok(dep_content) = fs::read_to_string(root.join(dep_rel)) {
+          if let Ok(dep_content) = checked_workspace_path(&root, &dep_rel)
+            .and_then(|path| read_text_bounded(&path).map_err(|e| e.to_string())) {
             let current_head: String = normalize_no_whitespace(content.as_str()).chars().take(140).collect();
             let dep_head: String = normalize_no_whitespace(dep_content.as_str()).chars().take(140).collect();
             if current_head.len() > 80 && dep_head.len() > 80 && current_head == dep_head {
@@ -503,8 +569,7 @@ pub(crate) fn read_text_scoped(state: &AppState, relative_path: &str, workspace:
   let root = scoped_workspace(state, workspace)?;
   let rel = validate_relative_path(relative_path)?;
   super::screenplay::check_manuscript_path(&root, &rel)?;
-  let target = root.join(rel);
-  fs::read_to_string(target).map_err(|e| format!("read failed: {e}"))
+  read_text_internal(&root, relative_path)
 }
 
 /// 导出整本：按章序合并 stories/ 下全部 .md 为单文档（元数据 title 优先，缺元数据用文件名）。
@@ -521,13 +586,17 @@ pub fn export_work(state: &AppState, format: &str) -> Result<(String, String), S
   }
 
   // 章节元数据（可选）
-  let meta: serde_json::Value =
-    serde_json::from_str(&fs::read_to_string(root.join(".novel/.settings/chapters.json")).unwrap_or_default())
-      .unwrap_or(serde_json::Value::Null);
+  let meta_path = checked_workspace_path(&root, Path::new(".novel/.settings/chapters.json"))?;
+  let raw_meta = match read_text_bounded(&meta_path) {
+    Ok(raw) => raw,
+    Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+    Err(e) => return Err(format!("read chapter metadata failed: {e}")),
+  };
+  let meta: serde_json::Value = serde_json::from_str(&raw_meta).unwrap_or(serde_json::Value::Null);
 
   // 收集 stories/*.md，按文件名排序兜底
   let mut files: Vec<String> = Vec::new();
-  let stories = root.join("stories");
+  let stories = checked_workspace_path(&root, Path::new("stories"))?;
   if stories.is_dir() {
     let mut entries: Vec<_> = fs::read_dir(&stories)
       .map_err(|e| format!("read stories failed: {e}"))?
@@ -560,7 +629,8 @@ pub fn export_work(state: &AppState, format: &str) -> Result<(String, String), S
 
   let mut indexed: Vec<(i64, String, String)> = Vec::new(); // (order, path, content)
   for path in &files {
-    let content = fs::read_to_string(root.join(path)).map_err(|e| format!("read {path} failed: {e}"))?;
+    let target = checked_workspace_path(&root, Path::new(path))?;
+    let content = read_text_bounded(&target).map_err(|e| format!("read {path} failed: {e}"))?;
     let order = find_meta(path).map(|(_, o)| o).unwrap_or(i64::MAX);
     indexed.push((order, path.clone(), content));
   }
@@ -761,15 +831,22 @@ pub(crate) fn write_text_internal_with_baseline(
   expected_current: Option<&str>,
 ) -> Result<(), String> {
   let _write_guard = TEXT_WRITE_LOCK.lock().map_err(|_| "file write lock is poisoned".to_string())?;
+  if content.len() > MAX_TEXT_BYTES { return Err("普通文本写入超过 16 MiB 上限；原文件未更改。".into()); }
   let rel = validate_relative_path(relative_path)?;
+  protect_managed_path(&rel)?;
   super::storyboard::protect_storage(root, &rel)?;
   let screenplay_scene = super::screenplay::check_manuscript_path(root, &rel)?;
   let rel_norm = rel.to_string_lossy().replace('\\', "/");
-  let target = root.join(rel);
+  let target = checked_workspace_path(root, &rel)?;
   let atomic = screenplay_scene || expected_current.is_some() || history_reason == "restore-backup";
 
+  if rel_norm.starts_with("concept/") && rel_norm.to_lowercase().ends_with(".md") {
+    checked_workspace_path(root, Path::new(".novel/.cache/concept_index.json"))?;
+  }
+
   let check_current = |expected: &str| -> Result<(), String> {
-    let current = fs::read_to_string(&target).map_err(|e| {
+    checked_workspace_path(root, &rel)?;
+    let current = read_text_bounded(&target).map_err(|e| {
       if e.kind() == std::io::ErrorKind::NotFound {
         "file changed on disk; file was removed before saving".to_string()
       } else { format!("read current file failed: {e}") }
@@ -785,7 +862,7 @@ pub(crate) fn write_text_internal_with_baseline(
 
   if rel_norm == ".novel/.cache/outline.json" {
     let existing = if target.exists() {
-      fs::read_to_string(&target).unwrap_or_default()
+      read_text_bounded(&target).map_err(|e| format!("read outline failed: {e}"))?
     } else {
       String::new()
     };
@@ -802,7 +879,7 @@ pub(crate) fn write_text_internal_with_baseline(
 
   let mut previous = None;
   if should_track_history_path(&rel_norm) {
-    match expected_current.map_or_else(|| fs::read_to_string(&target), |text| Ok(text.to_owned())) {
+    match expected_current.map_or_else(|| read_text_bounded(&target), |text| Ok(text.to_owned())) {
       Ok(text) => {
         if text != content {
           let snapshot = create_history_snapshot_internal(root, &rel_norm, &text, history_reason);
@@ -820,10 +897,12 @@ pub(crate) fn write_text_internal_with_baseline(
   }
   if atomic {
     super::workspace::replace_file(&target, content.as_bytes(), || {
+      checked_workspace_path(root, &rel)?;
       if let Some(expected) = expected_current.or(previous.as_deref()) { check_current(expected)?; }
       Ok(())
     })?;
   } else {
+    checked_workspace_path(root, &rel)?;
     fs::write(&target, content).map_err(|e| format!("write failed: {e}"))?;
   }
 
@@ -841,9 +920,10 @@ pub fn create_file(state: &AppState, relative_path: &str) -> Result<(), String> 
 pub(crate) fn create_file_scoped(state: &AppState, relative_path: &str, workspace: Option<&str>) -> Result<(), String> {
   let root = scoped_workspace(state, workspace)?;
   let rel = validate_relative_path(&relative_path)?;
+  protect_managed_path(&rel)?;
   super::storyboard::protect_storage(&root, &rel)?;
   super::screenplay::check_manuscript_path(&root, &rel)?;
-  let target = root.join(rel);
+  let target = checked_workspace_path(&root, &rel)?;
   if let Some(parent) = target.parent() {
     if !parent.exists() {
       return Err("parent directory does not exist; create it first".to_string());
@@ -863,11 +943,12 @@ pub(crate) fn create_dir_scoped(state: &AppState, relative_path: &str, workspace
   }
   let root = scoped_workspace(state, workspace)?;
   let rel = validate_relative_path(&relative_path)?;
+  protect_managed_path(&rel)?;
   super::storyboard::protect_storage(&root, &rel)?;
   if super::screenplay::in_scene_directory(&rel) && rel.components().count() > 1 && project_kind(&root) == ProjectKind::Screenplay {
     return Err("场次目录不支持子目录。".into());
   }
-  let target = root.join(rel);
+  let target = checked_workspace_path(&root, &rel)?;
   fs::create_dir_all(target).map_err(|e| format!("create dir failed: {e}"))
 }
 
@@ -882,11 +963,12 @@ pub(crate) fn delete_entry_scoped(state: &AppState, relative_path: &str, workspa
   let root = scoped_workspace(state, workspace)?;
   let rel = validate_relative_path(&relative_path)?;
   if rel.as_os_str().is_empty() { return Err("不能删除作品根目录。".into()); }
+  protect_managed_path(&rel)?;
   super::storyboard::protect_storage(&root, &rel)?;
   if super::screenplay::in_scene_directory(&rel) && project_kind(&root) == ProjectKind::Screenplay {
     return Err("应用不直接删除场次。关闭作品并备份后，可将多余场次移出 scenes/。".into());
   }
-  let target = root.join(rel);
+  let target = checked_workspace_path(&root, &rel)?;
   let md = fs::metadata(&target).map_err(|e| format!("stat failed: {e}"))?;
   if md.is_dir() {
     fs::remove_dir_all(target).map_err(|e| format!("delete dir failed: {e}"))
@@ -906,14 +988,16 @@ pub(crate) fn rename_entry_scoped(state: &AppState, from_relative_path: &str, to
   let root = scoped_workspace(state, workspace)?;
   let from_rel = validate_relative_path(&from_relative_path)?;
   let to_rel = validate_relative_path(&to_relative_path)?;
+  protect_managed_path(&from_rel)?;
+  protect_managed_path(&to_rel)?;
   super::storyboard::protect_storage(&root, &from_rel)?;
   super::storyboard::protect_storage(&root, &to_rel)?;
   if from_rel.as_os_str().is_empty() || to_rel.as_os_str().is_empty() { return Err("不能重命名作品根目录。".into()); }
   if (super::screenplay::in_scene_directory(&from_rel) || super::screenplay::in_scene_directory(&to_rel)) && project_kind(&root) == ProjectKind::Screenplay {
     return Err("请编辑场次的首行标题；原文件名用于关联场次与素材。".into());
   }
-  let from = root.join(from_rel);
-  let to = root.join(to_rel);
+  let from = checked_workspace_path(&root, &from_rel)?;
+  let to = checked_workspace_path(&root, &to_rel)?;
   if let Ok(meta) = fs::symlink_metadata(&to) {
     // A case-only rename on a case-insensitive file system may refer to the source itself.
     if meta.file_type().is_symlink() || fs::canonicalize(&from).ok() != fs::canonicalize(&to).ok() {
@@ -962,6 +1046,7 @@ fn build_tree(root: &Path, path: &Path, max_depth: usize) -> Result<FsEntry, Str
       let entry = entry.map_err(|e| format!("read dir entry failed: {e}"))?;
       if !entry.file_type().is_ok_and(|kind| kind.is_file() || kind.is_dir()) { continue; }
       let child_path = entry.path();
+      if checked_workspace_path(root, child_path.strip_prefix(root).map_err(|e| e.to_string())?).is_err() { continue; }
       let child = build_tree(root, &child_path, max_depth - 1)?;
       children.push(child);
     }

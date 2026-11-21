@@ -55,7 +55,12 @@ windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Security_Cr
 printpdf = "0.8.2"
 
 [profile.dev]
-incremental = true
+incremental = false
+debug = "line-tables-only"
+
+# 依赖不生成调试信息（体积大头），本地代码保留行号便于 backtrace
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 panic = "abort"

@@ -30,6 +30,8 @@ pub struct HistoryEntry {
   pub word_count: usize,
   pub char_count: usize,
   pub summary: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub content_hash: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -42,6 +44,8 @@ pub(crate) struct HistoryEntryRecord {
   pub(crate) word_count: usize,
   pub(crate) char_count: usize,
   pub(crate) summary: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) content_hash: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -52,6 +56,10 @@ pub(crate) struct HistoryStore {
 
 pub(crate) const HISTORY_MAX_ENTRIES: usize = 800;
 static HISTORY_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+#[path = "workspace_history_tests.rs"]
+mod history_tests;
 
 pub(crate) fn get_workspace_root(state: &AppState) -> Result<PathBuf, String> {
   state
@@ -78,14 +86,20 @@ pub(crate) fn canonicalize_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 pub(crate) fn validate_relative_path(relative_path: &str) -> Result<PathBuf, String> {
-  let p = PathBuf::from(relative_path);
+  if relative_path.chars().any(char::is_control) {
+    return Err("invalid relative path: control characters are not allowed".to_string());
+  }
+  let p = PathBuf::from(relative_path.replace('\\', "/"));
   if p.is_absolute() {
     return Err("absolute path is not allowed".to_string());
   }
   let mut normalized = PathBuf::new();
   for c in p.components() {
     match c {
-      Component::Normal(part) if !cfg!(windows) || !part.to_string_lossy().contains(':') => normalized.push(part),
+      // Reject portable aliases before managed-directory checks, including names
+      // that some filesystems normalize to a protected name.
+      Component::Normal(part) if !part.to_string_lossy().contains(':')
+        && !part.to_string_lossy().ends_with(['.', ' ']) => normalized.push(part),
       Component::CurDir => {},
       _ => return Err("invalid relative path".to_string()),
     }
@@ -353,7 +367,8 @@ fn load_history_store(root: &Path) -> Result<HistoryStore, String> {
     Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HistoryStore::default()),
     Err(e) => return Err(format!("read history index failed: {e}")),
   }
-  let raw = fs::read_to_string(path).map_err(|e| format!("read history index failed: {e}"))?;
+  let raw = super::fs::read_text_internal(root, ".novel/.history/revisions.json")
+    .map_err(|e| format!("read history index failed: {e}"))?;
   serde_json::from_str::<HistoryStore>(&raw).map_err(|e| format!("parse history index failed: {e}"))
 }
 
@@ -390,6 +405,7 @@ fn history_entry_from_record(record: &HistoryEntryRecord) -> HistoryEntry {
     word_count: record.word_count,
     char_count: record.char_count,
     summary: record.summary.clone(),
+    content_hash: record.content_hash.clone(),
   }
 }
 
@@ -416,11 +432,13 @@ pub(crate) fn create_history_snapshot_internal(
   snapshot_content: &str,
   reason: &str,
 ) -> Result<HistoryEntryRecord, String> {
+  let normalized_file_path = validate_relative_path(file_path)?.to_string_lossy().replace('\\', "/");
+  if normalized_file_path.is_empty() { return Err("快照来源不能是作品根目录。".into()); }
+  if snapshot_content.len() > super::fs::MAX_TEXT_BYTES { return Err("历史快照超过 16 MiB 上限。".into()); }
   let _guard = HISTORY_WRITE_LOCK.lock().map_err(|_| "history write lock is poisoned")?;
   let mut store = load_history_store(root)?;
   managed_dir(root, &[".novel", ".history", "snapshots"], true)?;
 
-  let normalized_file_path = file_path.replace('\\', "/");
   let ext = Path::new(&normalized_file_path)
     .extension()
     .and_then(|v| v.to_str())
@@ -439,6 +457,7 @@ pub(crate) fn create_history_snapshot_internal(
     word_count: count_content_chars(snapshot_content),
     char_count: snapshot_content.chars().count(),
     summary: summarize_snapshot(snapshot_content),
+    content_hash: Some(blake3::hash(snapshot_content.as_bytes()).to_hex().to_string()),
   };
   store.entries.insert(0, record.clone());
 
@@ -486,11 +505,8 @@ pub fn create_history_snapshot(
   let rel = validate_relative_path(relative_path)?;
   super::screenplay::check_manuscript_path(root, &rel)?;
   let rel_norm = rel.to_string_lossy().replace('\\', "/");
-  let target = root.join(rel);
-  if !target.exists() {
-    return Err("target file does not exist".to_string());
-  }
-  let content = fs::read_to_string(target).map_err(|e| format!("read snapshot source failed: {e}"))?;
+  let content = super::fs::read_text_internal(root, &rel_norm)
+    .map_err(|e| format!("read snapshot source failed: {e}"))?;
   let reason_text = reason
     .as_deref()
     .map(str::trim)
@@ -511,7 +527,12 @@ fn read_history_record(root: &Path, record: &HistoryEntryRecord) -> Result<Strin
   if managed_dir(root, &[".novel", ".history", "snapshots"], false)?.is_none() { return Err("快照目录不存在。".into()); }
   let path = snapshot_path(root, &record.snapshot_rel_path)?;
   if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) { return Err("快照不存在或不是普通文件。".into()); }
-  fs::read_to_string(path).map_err(|e| format!("read snapshot failed: {e}"))
+  let content = super::fs::read_text_internal(root, &record.snapshot_rel_path)
+    .map_err(|e| format!("read snapshot failed: {e}"))?;
+  if record.content_hash.as_ref().is_some_and(|hash| *hash != blake3::hash(content.as_bytes()).to_hex().as_str()) {
+    return Err("历史快照校验失败，可能已被外部修改；未恢复或覆盖原稿。".into());
+  }
+  Ok(content)
 }
 
 pub fn restore_history_snapshot(root: &Path, id: &str) -> Result<String, String> {

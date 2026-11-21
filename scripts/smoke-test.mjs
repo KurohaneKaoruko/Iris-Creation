@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
+import { verifyFilesystemBoundaries } from './fs-boundary-smoke.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const binary = resolve(process.argv[2] || join(root, `src-tauri/target/debug/iris-creation-server${process.platform === 'win32' ? '.exe' : ''}`))
@@ -124,12 +125,39 @@ try {
   const history = await rpc('list_history_entries')
   const snapshot = history.find((entry) => entry.file_path === path)
   assert.ok(snapshot)
+  assert.match(snapshot.content_hash, /^[0-9a-f]{64}$/)
   assert.equal(await rpc('read_history_snapshot', { id: snapshot.id }), original)
   await rpc('restore_history_snapshot', { id: snapshot.id })
   assert.equal(await rpc('read_text', { path }), original)
+  const restoreBackup = (await rpc('list_history_entries')).find(entry => entry.file_path === path && entry.reason === 'restore-backup')
+  assert.ok(restoreBackup)
+  assert.equal(await rpc('read_history_snapshot', { id: restoreBackup.id }), `${original}新段落。\n`)
+  await rpc('restore_history_snapshot', { id: restoreBackup.id, expectedCurrent: original })
+  assert.equal(await rpc('read_text', { path }), `${original}新段落。\n`)
+  await rpc('restore_history_snapshot', { id: snapshot.id, expectedCurrent: `${original}新段落。\n` })
+  const historyIndexPath = join(work.path, '.novel/.history/revisions.json')
+  const savedIndex = await readFile(historyIndexPath)
+  const savedStore = JSON.parse(savedIndex)
+  const savedRecord = savedStore.entries.find(entry => entry.id === snapshot.id)
+  assert.ok(savedRecord.snapshot_rel_path.startsWith('.novel/.history/snapshots/'))
+  const savedSnapshotPath = join(work.path, savedRecord.snapshot_rel_path)
+  const savedSnapshot = await readFile(savedSnapshotPath)
+  await writeFile(savedSnapshotPath, 'tampered snapshot')
+  await assert.rejects(rpc('read_history_snapshot', { id: snapshot.id }), /校验/)
+  await assert.rejects(rpc('restore_history_snapshot', { id: snapshot.id, expectedCurrent: original }), /校验/)
+  assert.equal(await rpc('read_text', { path }), original)
+  assert.deepEqual(await readFile(historyIndexPath), savedIndex)
+  await writeFile(savedSnapshotPath, savedSnapshot)
+  delete savedRecord.content_hash // legacy records remain readable without pretending to be verified
+  await writeFile(historyIndexPath, JSON.stringify(savedStore))
+  assert.equal(await rpc('read_history_snapshot', { id: snapshot.id }), original)
+  await writeFile(historyIndexPath, savedIndex)
   await assert.rejects(rpc('read_text', { path: '../outside.md' }))
   assert.ok((await rpc('export_work', { format: 'md' })).content.includes('这是保存、恢复与重启验收'))
-  passed.push('Unicode/CRLF save, stale-save rejection, history restore, export and path guard')
+  passed.push('Unicode/CRLF save, stale-save rejection, reversible history restore, snapshot integrity/legacy metadata, export and path guard')
+
+  const boundaries = await verifyFilesystemBoundaries({ rpc, base, workRoot: work.path, path, original, sandbox })
+  passed.push(`filesystem HTTP boundary: unsafe/managed/stale paths, unchanged manuscript/history, MD/Markdown/TXT and internal JSON compatibility, 16 MiB read/body limits; symlinks ${boundaries.symlinksChecked ? 'checked' : 'not checked on Windows'}`)
 
   const settings = await rpc('get_app_settings')
   settings.providers = [{ id: 'smoke-local', name: 'Local acceptance fixture', kind: 'OpenAICompatible', api_key: '', base_url: `http://127.0.0.1:${provider.address().port}/v1`, model_name: 'fixture' }]
@@ -219,7 +247,11 @@ try {
   assert.ok(shotSheet.indexOf('手中车票') < shotSheet.indexOf('月台远景'))
   assert.ok(shotSheet.includes(`../${reference.path}`))
   const beforeInvalidImport = await readdir(join(workspaceRoot, 'creative/references'))
-  await assert.rejects(rpc('import_storyboard_image', { workspaceRoot, revision: board.revision, shotId: null, role: 'reference', name: '伪装图', originalName: 'bad.png', base64: Buffer.from('<svg></svg>').toString('base64') }), /图片|PNG/)
+  const beforeInvalidBoard = await readFile(boardPath)
+  for (const encoded of ['', 'invalid-base64!', Buffer.from('<svg></svg>').toString('base64'), fixtureImage.subarray(0, fixtureImage.length / 2).toString('base64'), 'A'.repeat(Math.ceil((10 * 1024 * 1024) / 3) * 4 + 4)]) {
+    await assert.rejects(rpc('import_storyboard_image', { workspaceRoot, revision: board.revision, shotId: null, role: 'reference', name: '伪装图', originalName: 'bad.png', base64: encoded }), /图片|PNG|10 M/)
+    assert.deepEqual(await readFile(boardPath), beforeInvalidBoard)
+  }
   assert.deepEqual(await readdir(join(workspaceRoot, 'creative/references')), beforeInvalidImport)
   await assert.rejects(rpc('load_storyboard'), /workspaceRoot/)
   passed.push('storyboard: shots/order, stale-write rejection, local validated image import/preview and ordered export')

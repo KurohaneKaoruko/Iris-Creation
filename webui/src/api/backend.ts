@@ -245,6 +245,7 @@ export type HistoryEntry = {
   word_count: number
   char_count: number
   summary: string
+  content_hash?: string
 }
 
 export const listHistoryEntries = (max = 120, workspaceRoot?: string, relativePath?: string) =>

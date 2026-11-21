@@ -590,6 +590,10 @@ pub fn test_context() -> ServerContext {
 }
 
 #[cfg(test)]
+#[path = "rpc_boundary_tests.rs"]
+mod boundary_tests;
+
+#[cfg(test)]
 mod tests {
   use super::*;
 
