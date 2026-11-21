@@ -38,7 +38,7 @@
 ## 文件服务安全边界
 
 - 小说保留 `.md`、`.markdown`、`.txt` 正文；内部功能继续读写章节元数据、写作历史、任务队列、缓存和记忆索引，不迁移或删除既有工程文件。
-- 普通文件接口不能修改版本控制目录 `.git/`、历史存储 `.novel/.history/`、CLI 快照 `.novel/snapshots/` 和工程身份 `.novel/work.json`；也不能删除/重命名它们的上级受管目录。分镜与参考图仍经专用接口管理。
+- 普通文件接口不能修改版本控制目录 `.git/`、历史存储 `.novel/.history/`、CLI 快照 `.novel/snapshots/` 和工程身份 `.novel/work.json`；也不能删除/重命名它们的上级受管目录。分镜、参考图与媒体任务文件（`creative/` 受管名）经专用接口管理。
 - 相对路径在当前作品根内解析；兼容正反斜杠、`./` 与重复分隔符，拒绝父目录、绝对路径、跨平台盘符、控制字符、尾随点/空格别名和已有的符号链接/重解析目录。文件读写、新建、重命名和删除共用边界校验；目录树、文件引用、质量检查和小说导出不跟随链接。
 - 单次普通文本读写上限 16 MiB，UTF-8 多字节文本按字节计；超限拒绝且不改原稿、历史或索引。HTTP 请求总大小仍受 16 MiB 限制（包含 JSON 开销）。参考图片沿用 10 MiB / 24 MP 限制，不改变原图保留策略。
 
@@ -62,17 +62,19 @@
 - 「编辑此处」把源行命中转换为 textarea 选区；textarea 值的 CRLF 由浏览器归一为 LF，偏移按 LF 文本计算。找不到旧词时只把光标移到该行行首。
 - 自动化回归：`webui/src/api/search.test.ts`（纯函数）、`webui/src/features/agent/MarkdownView.test.tsx`（渲染与锚点）、`webui/src/features/agent/FilePreview.test.tsx`（滚动目标按源行属性）、`webui/src/features/agent/editor-safety.test.tsx`（Ctrl+K 检索 → 预览 → 编辑全链路）。
 
-## 创作台媒体服务（未接线）
+## 创作台媒体服务（已接线）
 
-- `src-tauri/src/services/creative.rs` 与 `creative_media.rs` 已实现 board 存取与图像/视频生成服务，但**尚未接入任何 RPC、Tauri command 或 Agent 工具**，当前发布版不可触达；保持未提交状态直至接线评审。
-- 设计时已包含的边界（接线时不得回退）：媒体密钥经 `secrets` 通道按服务地址分键存储，前端只接收“已配置”布尔值；下载仅限同源或 Runway 官方 CloudFront、禁重定向、校验 MP4 `ftyp` 头；图像 ≤24 MB、视频 ≤128 MB、单作品并发 ≤3；跨进程中断的提交标记为 `Interrupted`，不隐式重试。
+- `creative.rs`（board 存取，`creative/board.json`，512 KB 上限 + BLAKE3 基线乐观并发）与 `creative_media.rs`（图像/视频生成任务，`creative/jobs/*.json` + `creative/assets/*`）已接入 RPC：`load_creative_board`、`save_creative_board`、`list_creative_media`、`import_creative_image`、`generate_creative_media`、`refresh_creative_media`、`get/save_creative_media_settings`；媒体字节经专用流式端点 `GET /api/creative-media/{id}` 返回（支持单段 Range/206，视频可拖动进度条），不经 16 MiB 的 JSON RPC 通道。
+- 任务生命周期：`Submitting`（落盘后未确认）→ `Waiting`（供应商任务号已记录）→ `Ready`（产物经校验落盘）/ `Failed`；跨进程中断的提交标记为 `Interrupted`，不隐式重试。单作品并发 ≤3；图像 ≤24 MB、视频 ≤128 MB、导入图 ≤10 MB/24 MP。
+- 边界（不得回退）：媒体密钥经 `secrets` 通道按「服务地址」分键存储（`iris-creative-image/video-<blake3(base)>`），前端只接收“已配置”布尔值；下载仅限同源或 Runway 官方 CloudFront、禁重定向、校验 MP4 `ftyp` 头；服务地址必须 HTTPS（本机回环可用 HTTP），不得含用户名/密码/查询/片段。`refresh` 只在 `Waiting` 状态发起供应商查询，其余状态为本地幂等读。
+- 普通文件接口的 `protect_storage` 已覆盖 `creative/board.json`、`creative/jobs/`、`creative/assets/`（与 `storyboard.json`/`references` 一并保护，且不再区分作品类型——小说工程同样拦截）。受管祖先目录（`creative` 及其受管子目录）不可经通用文件命令删除/改名。
 - 密钥存储沿用 `secrets.rs`：Windows 使用 DPAPI，macOS/Linux 仅为 Base64 本地文件，**不是**跨平台加密存储。
-- 遗留缺口：普通文件接口的 `protect_storage` 尚未覆盖 `creative/board.json`、`creative/jobs/`、`creative/assets/`；接线前必须扩展保护并补回归测试。
+- 自动化回归：`src-tauri/src/server/rpc_boundary_tests.rs`（保护与往返）、`src-tauri/src/server/mod.rs` 的 `media_endpoint_tests`（流式/Range/越权）、`webui/src/features/agent/media-studio.test.tsx`（设置与表单边界）、`scripts/smoke-test.mjs` 媒体段（fake 供应商全链路）。真实付费模型/网络仅由用户自行验收，不在自动化范围内。
 
 ## 后续实现顺序
 
 | 阶段 | 交付与验收标准 |
 | --- | --- |
 | 分镜与素材库（本地版已实现） | 从场次编排镜头、景别、运镜和时长；本地关联人物、场景与参考图，镜头排序不改原稿，整目录复制可恢复。不含图像/视频生成。 |
-| 图片生成与编辑 | 每项任务显示用哪家模型、上传什么参考素材；先预览再纳入工程。编辑保留源图和版本，先验证失败、取消及断网恢复。 |
-| 视频生成 | 先以单镜头的图生视频为起点，记录任务状态与产物，重启后可查询或重试而不重复提交；再做漫剧、短剧的多镜头编排与成片导出。 |
+| 图片生成与编辑 | 已接线：媒体工作台（生成/编辑/导入 + 视频生成）。每项任务显示所用模型与参考素材；产物先落盘校验再展示。真实供应商效果需用户自行验收。 |
+| 视频生成 | 已接线：单镜头文生/图生视频（Runway 兼容协议），任务状态与产物持久化，重启后可查询而不重复提交；多镜头编排与成片导出未实现。 |

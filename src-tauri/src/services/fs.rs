@@ -777,7 +777,7 @@ mod export_tests {
     let original = r#"{"version":1,"shots":[],"assets":[]}"#;
     std::fs::write(&path, original).unwrap();
     let error = write_text_internal_with_baseline(&root, "creative/storyboard.json", "{}", false, "auto-save", Some(original)).unwrap_err();
-    assert!(error.contains("分镜与素材工具管理"));
+    assert!(error.contains("分镜与媒体服务管理"));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     std::fs::remove_dir_all(root).unwrap();
   }
@@ -834,7 +834,7 @@ pub(crate) fn write_text_internal_with_baseline(
   if content.len() > MAX_TEXT_BYTES { return Err("普通文本写入超过 16 MiB 上限；原文件未更改。".into()); }
   let rel = validate_relative_path(relative_path)?;
   protect_managed_path(&rel)?;
-  super::storyboard::protect_storage(root, &rel)?;
+  super::storyboard::protect_storage(&rel)?;
   let screenplay_scene = super::screenplay::check_manuscript_path(root, &rel)?;
   let rel_norm = rel.to_string_lossy().replace('\\', "/");
   let target = checked_workspace_path(root, &rel)?;
@@ -921,7 +921,7 @@ pub(crate) fn create_file_scoped(state: &AppState, relative_path: &str, workspac
   let root = scoped_workspace(state, workspace)?;
   let rel = validate_relative_path(&relative_path)?;
   protect_managed_path(&rel)?;
-  super::storyboard::protect_storage(&root, &rel)?;
+  super::storyboard::protect_storage(&rel)?;
   super::screenplay::check_manuscript_path(&root, &rel)?;
   let target = checked_workspace_path(&root, &rel)?;
   if let Some(parent) = target.parent() {
@@ -944,7 +944,7 @@ pub(crate) fn create_dir_scoped(state: &AppState, relative_path: &str, workspace
   let root = scoped_workspace(state, workspace)?;
   let rel = validate_relative_path(&relative_path)?;
   protect_managed_path(&rel)?;
-  super::storyboard::protect_storage(&root, &rel)?;
+  super::storyboard::protect_storage(&rel)?;
   if super::screenplay::in_scene_directory(&rel) && rel.components().count() > 1 && project_kind(&root) == ProjectKind::Screenplay {
     return Err("场次目录不支持子目录。".into());
   }
@@ -964,7 +964,7 @@ pub(crate) fn delete_entry_scoped(state: &AppState, relative_path: &str, workspa
   let rel = validate_relative_path(&relative_path)?;
   if rel.as_os_str().is_empty() { return Err("不能删除作品根目录。".into()); }
   protect_managed_path(&rel)?;
-  super::storyboard::protect_storage(&root, &rel)?;
+  super::storyboard::protect_storage(&rel)?;
   if super::screenplay::in_scene_directory(&rel) && project_kind(&root) == ProjectKind::Screenplay {
     return Err("应用不直接删除场次。关闭作品并备份后，可将多余场次移出 scenes/。".into());
   }
@@ -990,8 +990,8 @@ pub(crate) fn rename_entry_scoped(state: &AppState, from_relative_path: &str, to
   let to_rel = validate_relative_path(&to_relative_path)?;
   protect_managed_path(&from_rel)?;
   protect_managed_path(&to_rel)?;
-  super::storyboard::protect_storage(&root, &from_rel)?;
-  super::storyboard::protect_storage(&root, &to_rel)?;
+  super::storyboard::protect_storage(&from_rel)?;
+  super::storyboard::protect_storage(&to_rel)?;
   if from_rel.as_os_str().is_empty() || to_rel.as_os_str().is_empty() { return Err("不能重命名作品根目录。".into()); }
   if (super::screenplay::in_scene_directory(&from_rel) || super::screenplay::in_scene_directory(&to_rel)) && project_kind(&root) == ProjectKind::Screenplay {
     return Err("请编辑场次的首行标题；原文件名用于关联场次与素材。".into());

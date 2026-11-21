@@ -7,6 +7,8 @@ pub mod agent_cli;
 pub mod ai_stream;
 pub mod bookshelf;
 pub mod chat;
+pub(crate) mod creative;
+pub(crate) mod creative_media;
 pub mod dir_browse;
 pub mod fs;
 pub(crate) mod screenplay;
@@ -16,10 +18,14 @@ pub mod settings;
 pub mod workspace;
 
 pub(crate) fn build_http_client() -> Result<reqwest::Client, String> {
-  reqwest::Client::builder()
+  provider_client_builder()
     .connect_timeout(std::time::Duration::from_secs(15))
     .timeout(std::time::Duration::from_secs(300))
     .pool_idle_timeout(std::time::Duration::from_secs(90))
     .build()
     .map_err(|e| format!("http client build failed: {e}"))
+}
+
+pub(crate) fn provider_client_builder() -> reqwest::ClientBuilder {
+  reqwest::Client::builder().user_agent(concat!("Iris-Creation/", env!("CARGO_PKG_VERSION")))
 }

@@ -11,9 +11,10 @@
 use crate::event_sink::{BroadcastEventSink, SharedEventSink};
 use crate::state::AppState;
 use axum::{
+  body::Body,
   extract::{DefaultBodyLimit, Path, State, WebSocketUpgrade},
   http::{HeaderMap, StatusCode},
-  response::IntoResponse,
+  response::{IntoResponse, Response},
   routing::{get, post},
   Router,
 };
@@ -134,6 +135,7 @@ async fn prepare(config: ServerConfig) -> Result<(tokio::net::TcpListener, Route
   let app = Router::new()
     .route("/api/health", get(health))
     .route("/api/rpc/{command}", post(rpc))
+    .route("/api/creative-media/{id}", get(creative_media_file))
     .route("/ws", get(ws_upgrade))
     .fallback_service(serve_frontend)
     // A PNG compressed to JSON/base64 expands by about one third; media import is
@@ -192,6 +194,116 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
 async fn health() -> impl IntoResponse {
   json!({ "ok": true, "app": "iris-creation-server" }).to_string()
 }
+
+fn error_response(status: StatusCode, message: &str) -> Response {
+  Response::builder()
+    .status(status)
+    .header("content-type", "text/plain; charset=utf-8")
+    .header("cache-control", "no-store")
+    .body(Body::from(message.to_string()))
+    .unwrap_or_else(|_| Body::from("内部错误").into_response())
+}
+
+/// 按任务 ID 流式返回媒体产物。只服务当前已打开作品 creative/assets/ 内经
+/// 哈希/长度校验的普通文件；视频最大 128 MB，不能走 16 MiB 的 JSON RPC 通道。
+/// Range 请求支持视频拖动进度条。
+async fn creative_media_file(
+  State(ctx): State<ServerContext>,
+  Path(id): Path<String>,
+  headers: HeaderMap,
+) -> Response {
+  use tokio::io::{AsyncReadExt, AsyncSeekExt};
+  if !origin_allowed(&headers) {
+    return error_response(StatusCode::FORBIDDEN, "forbidden origin");
+  }
+  let Ok(id) = uuid::Uuid::parse_str(&id) else {
+    return error_response(StatusCode::NOT_FOUND, "素材 ID 无效");
+  };
+  let Ok(root) = crate::services::workspace::get_workspace_root(&ctx.app_state) else {
+    return error_response(StatusCode::CONFLICT, "作品未打开");
+  };
+  // job 元数据与文件校验走阻塞线程池；此处不做网络请求。
+  let located = tokio::task::spawn_blocking(move || crate::services::creative_media::file(&root, id))
+    .await
+    .unwrap_or_else(|_| Err("读取媒体文件异常退出。".to_string()));
+  let Ok((path, mime)) = located else {
+    return error_response(StatusCode::NOT_FOUND, "素材未就绪或已移除");
+  };
+  let mut file = match tokio::fs::File::open(&path).await {
+    Ok(file) => file,
+    Err(_) => return error_response(StatusCode::NOT_FOUND, "素材文件已丢失"),
+  };
+  let len = match file.metadata().await {
+    Ok(meta) => meta.len(),
+    Err(_) => return error_response(StatusCode::NOT_FOUND, "素材文件已丢失"),
+  };
+  if len == 0 { return error_response(StatusCode::NOT_FOUND, "素材文件已丢失"); }
+  let (start, end) = match headers
+    .get("range")
+    .and_then(|value| value.to_str().ok())
+    .map(|raw| parse_range(raw, len))
+  {
+    Some(Ok(range)) => range,
+    Some(Err(())) => return error_response(StatusCode::RANGE_NOT_SATISFIABLE, "Range 无效"),
+    None => (0, len.saturating_sub(1)),
+  };
+  if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+    return error_response(StatusCode::NOT_FOUND, "素材文件已丢失");
+  }
+
+  // remaining 必须放进 unfold 状态（而非闭包捕获）：async move 每次取的是副本，
+  // u64 是 Copy，捕获的计数跨迭代不会更新。
+  let remaining = end - start + 1;
+  let stream = futures_util::stream::unfold((file, remaining), |(mut file, mut remaining)| async move {
+    if remaining == 0 { return None; }
+    let chunk_len = remaining.min(64 * 1024) as usize;
+    let mut buffer = vec![0u8; chunk_len];
+    match file.read_exact(&mut buffer).await {
+      Ok(_) => {
+        remaining -= chunk_len as u64;
+        Some((Ok(axum::body::Bytes::from(buffer)), (file, remaining)))
+      }
+      Err(e) => Some((Err(e), (file, 0))),
+    }
+  });
+
+  let mut builder = Response::builder()
+    .header("content-type", mime)
+    .header("accept-ranges", "bytes")
+    .header("cache-control", "no-store")
+    .header("content-length", end - start + 1);
+  if headers.contains_key("range") {
+    builder = builder
+      .status(StatusCode::PARTIAL_CONTENT)
+      .header("content-range", format!("bytes {start}-{end}/{len}"));
+  }
+  builder
+    .body(Body::from_stream(stream))
+    .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "内部错误"))
+}
+
+/// `bytes=start-end`（单段；end 可省略，也支持 `bytes=-N` 后缀形式）。
+/// 返回闭区间 [start, end]；空文件只有 (0, 0) 一种退化情形，直接整段返回。
+fn parse_range(raw: &str, len: u64) -> Result<(u64, u64), ()> {
+  if len == 0 { return Err(()); }
+  let Some(spec) = raw.trim().strip_prefix("bytes=") else {
+    return Err(());
+  };
+  let Some((start_raw, end_raw)) = spec.split_once('-') else {
+    return Err(());
+  };
+  if start_raw.is_empty() {
+    let n: u64 = end_raw.parse().map_err(|_| ())?;
+    if n == 0 { return Err(()); }
+    return Ok((len.saturating_sub(n), len - 1));
+  }
+  let start: u64 = start_raw.parse().map_err(|_| ())?;
+  if start >= len { return Err(()); }
+  let end = if end_raw.is_empty() { len - 1 } else { end_raw.parse::<u64>().map_err(|_| ())?.min(len - 1) };
+  if end < start { return Err(()); }
+  Ok((start, end))
+}
+
 
 /// 来源校验：仅允许本机回环来源（防 DNS rebinding / 跨站访问）。
 fn origin_allowed(headers: &HeaderMap) -> bool {
@@ -315,8 +427,105 @@ async fn ws_handle(ctx: ServerContext, socket: axum::extract::ws::WebSocket, mut
 }
 
 #[cfg(test)]
+mod media_endpoint_tests {
+  use super::*;
+  use axum::http::Request;
+  use std::{fs, path::PathBuf};
+  use tower::util::ServiceExt;
+
+  struct TempProject {
+    base: PathBuf,
+    root: PathBuf,
+  }
+
+  impl TempProject {
+    fn new() -> Self {
+      let base = std::env::temp_dir().join(format!("iris-media-endpoint-{}", uuid::Uuid::new_v4()));
+      let root = base.join("work");
+      fs::create_dir_all(&root).unwrap();
+      let root = fs::canonicalize(&root).unwrap();
+      Self { base, root }
+    }
+  }
+
+  impl Drop for TempProject {
+    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.base); }
+  }
+
+  #[tokio::test]
+  async fn media_endpoint_serves_ready_assets_with_ranges_and_scopes_to_workspace() {
+    let project = TempProject::new();
+    let ctx = super::rpc_dispatch::test_context();
+    let state = ctx.app_state.clone();
+    *state.workspace_root.lock().unwrap() = Some(project.root.clone());
+    let router = Router::new()
+      .route("/api/creative-media/{id}", get(creative_media_file))
+      .with_state(ctx);
+
+    let png = crate::services::local_assets::fixture_png();
+    let job = crate::services::creative_media::import(&project.root, None, &png).unwrap();
+    let url = format!("/api/creative-media/{}", crate::services::creative_media::media_id(&job));
+
+    let full = router
+      .clone()
+      .oneshot(Request::get(&url).header("host", "127.0.0.1:8765").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(full.headers()["content-type"], "image/png");
+    assert_eq!(full.headers()["content-length"], png.len().to_string());
+    let bytes = axum::body::to_bytes(full.into_body(), 64 * 1024 * 1024).await.unwrap();
+    assert_eq!(&bytes[..], &png[..]);
+
+    let partial = router
+      .clone()
+      .oneshot(Request::get(&url).header("host", "127.0.0.1:8765").header("range", "bytes=2-5").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(partial.headers()["content-range"], format!("bytes 2-5/{}", png.len()));
+    let slice = axum::body::to_bytes(partial.into_body(), 1024).await.unwrap();
+    assert_eq!(&slice[..], &png[2..=5]);
+
+    // 后缀 Range（视频拖动常见形式）
+    let suffix = router
+      .clone()
+      .oneshot(Request::get(&url).header("host", "127.0.0.1:8765").header("range", "bytes=-3").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(suffix.status(), StatusCode::PARTIAL_CONTENT);
+    let tail = axum::body::to_bytes(suffix.into_body(), 1024).await.unwrap();
+    assert_eq!(&tail[..], &png[png.len() - 3..]);
+
+    // 未就绪/不存在的任务、格式错误的 ID、外来 Origin 全部拒绝。
+    let missing = uuid::Uuid::new_v4();
+    for (path, expect) in [(format!("/api/creative-media/{missing}"), StatusCode::NOT_FOUND), ("/api/creative-media/not-a-uuid".to_string(), StatusCode::NOT_FOUND)] {
+      let response = router
+        .clone()
+        .oneshot(Request::get(&path).header("host", "127.0.0.1:8765").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+      assert_eq!(response.status(), expect, "{path}");
+    }
+    let foreign = router
+      .clone()
+      .oneshot(Request::get(&url).header("host", "127.0.0.1:8765").header("origin", "https://evil.com").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+
+    // 换工作区后旧素材不可读（素材归属原作品）。
+    *state.workspace_root.lock().unwrap() = None;
+    let gone = router
+      .oneshot(Request::get(&url).header("host", "127.0.0.1:8765").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(gone.status(), StatusCode::CONFLICT);
+  }
+}
+#[cfg(test)]
 mod origin_tests {
-  use super::origin_allowed;
+  use super::*;
   use axum::http::HeaderMap;
 
   fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -328,6 +537,21 @@ mod origin_tests {
       );
     }
     map
+  }
+
+  #[test]
+  fn range_parsing_accepts_single_ranges_and_rejects_the_rest() {
+    assert_eq!(parse_range("bytes=0-0", 10).unwrap(), (0, 0));
+    assert_eq!(parse_range("bytes=0-", 10).unwrap(), (0, 9));
+    assert_eq!(parse_range("bytes=5-", 10).unwrap(), (5, 9));
+    assert_eq!(parse_range("bytes=8-99", 10).unwrap(), (8, 9));
+    assert_eq!(parse_range("bytes=-4", 10).unwrap(), (6, 9));
+    assert!(parse_range("bytes=10-", 10).is_err());
+    assert!(parse_range("bytes=9-8", 10).is_err());
+    assert!(parse_range("bytes=-0", 10).is_err());
+    assert!(parse_range("bytes=0-1,5-6", 10).is_err(), "multi-range not supported");
+    assert!(parse_range("items=0-", 10).is_err());
+    assert!(parse_range("bytes=0-", 0).is_err(), "empty file has no valid range");
   }
 
   #[test]

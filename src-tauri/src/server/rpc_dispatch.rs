@@ -196,6 +196,68 @@ pub async fn dispatch(ctx: &ServerContext, command: &str, args: Value) -> Result
       }).await.map_err(|_| "本地分镜操作异常退出，原稿未更改。".to_string())?;
     }
 
+    // ---- creative board & media studio (workspace-scoped; provider keys never leave the server) ----
+    "load_creative_board" | "save_creative_board" | "list_creative_media" | "import_creative_image"
+      | "generate_creative_media" | "refresh_creative_media" => {
+      use crate::services::{creative, creative_media, workspace::scoped_workspace};
+      let expected = workspace.as_deref().ok_or("missing argument: workspaceRoot")?;
+      let root = scoped_workspace(state, Some(expected))?;
+      match command {
+        "load_creative_board" => {
+          let board = tokio::task::spawn_blocking(move || creative::load_board(&root)).await
+            .map_err(|_| "读取创作台异常退出。".to_string())??;
+          serde_json::to_value(board).map_err(|e| e.to_string())
+        }
+        "save_creative_board" => {
+          let revision = arg_opt_str(&args, &["revision"]);
+          let board = arg_t(&args, "board")?;
+          let revision = tokio::task::spawn_blocking(move || creative::save_board(&root, revision.as_deref(), board)).await
+            .map_err(|_| "保存创作台异常退出。".to_string())??;
+          Ok(json!(revision))
+        }
+        "list_creative_media" => {
+          let library = tokio::task::spawn_blocking(move || creative_media::list(&root)).await
+            .map_err(|_| "读取素材库异常退出。".to_string())??;
+          serde_json::to_value(library).map_err(|e| e.to_string())
+        }
+        "import_creative_image" => {
+          use base64::Engine;
+          let shot: Option<uuid::Uuid> = arg_t(&args, "shotId")?;
+          let encoded = arg_str(&args, &["base64"])?;
+          const MAX_ENCODED: usize = (creative_media::IMPORT_LIMIT + 2) / 3 * 4;
+          if encoded.len() > MAX_ENCODED { return Err("导入图片不能超过 10 MB。".into()); }
+          let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "图片编码无效。".to_string())?;
+          let job = tokio::task::spawn_blocking(move || creative_media::import(&root, shot, &bytes)).await
+            .map_err(|_| "导入图片异常退出。".to_string())??;
+          serde_json::to_value(job).map_err(|e| e.to_string())
+        }
+        "generate_creative_media" => {
+          let request: creative_media::GenerateMedia = arg_t(&args, "request")?;
+          let job = tokio::task::spawn_blocking(move || creative_media::generate(root, request)).await
+            .map_err(|_| "媒体任务提交异常退出。".to_string())??;
+          serde_json::to_value(job).map_err(|e| e.to_string())
+        }
+        _ => {
+          let id: uuid::Uuid = arg_t(&args, "id")?;
+          serde_json::to_value(creative_media::refresh(&root, id).await?).map_err(|e| e.to_string())
+        }
+      }
+    }
+
+    // ---- creative media provider settings (app-level; keys go through the secrets channel) ----
+    "get_creative_media_settings" | "save_creative_media_settings" => {
+      use crate::services::creative_media;
+      match command {
+        "get_creative_media_settings" => serde_json::to_value(creative_media::get_settings()?).map_err(|e| e.to_string()),
+        _ => {
+          let request = arg_t(&args, "request")?;
+          let view = tokio::task::spawn_blocking(move || creative_media::save_settings(request)).await
+            .map_err(|_| "保存媒体服务设置异常退出。".to_string())??;
+          serde_json::to_value(view).map_err(|e| e.to_string())
+        }
+      }
+    }
+
     // ---- screenplay: mutations and reads are bound to the project that opened the UI ----
     "list_screenplay_scenes" | "create_screenplay_scene" | "reorder_screenplay_scenes" | "save_screenplay_export" => {
       use crate::services::{screenplay, workspace::scoped_workspace};

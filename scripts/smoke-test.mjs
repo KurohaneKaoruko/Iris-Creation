@@ -18,9 +18,45 @@ let child, ws, base, output = '', mode = 'success'
 const events = []
 let agentCalls = 0
 const sse = (content) => `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`
+// 媒体 fake 供应商共享状态（PNG fixture / 最小 MP4 / Runway 任务表）
+const mediaFixtures = await readFile(join(root, 'src-tauri/icons/32x32.png'))
+const mediaImageB64 = mediaFixtures.toString('base64')
+const mediaVideo = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(64, 7)])
+let runwayTaskSeq = 1
+const runwayTasks = new Map()
 const provider = createServer(async (req, res) => {
   let body = ''
   for await (const chunk of req) body += chunk
+  // ---- 媒体工作台 fake 供应商（OpenAI 兼容图像 / Runway 兼容视频 / 假 CDN）----
+  if (req.url.startsWith('/img/images/')) {
+    if (!/Bearer sk-image-smoke/.test(req.headers.authorization ?? '')) { res.writeHead(401); res.end('{}'); return }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ data: [{ b64_json: mediaImageB64 }] }))
+    return
+  }
+  if (req.url.startsWith('/vid/v1/text_to_video') || req.url.startsWith('/vid/v1/image_to_video')) {
+    if (!/Bearer sk-video-smoke/.test(req.headers.authorization ?? '') || !(req.headers['x-runway-version'] === '2024-11-06')) { res.writeHead(401); res.end('{}'); return }
+    const id = `11111111-2222-3333-4444-${String(runwayTaskSeq++).padStart(12, '0')}`
+    runwayTasks.set(id, { status: 'PENDING', tries: 0 })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ id }))
+    return
+  }
+  if (req.url.startsWith('/vid/v1/tasks/')) {
+    const task = runwayTasks.get(req.url.split('/').pop())
+    if (!task) { res.writeHead(404); res.end('{}'); return }
+    task.tries += 1
+    if (task.tries < 2) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ status: 'RUNNING', progress: 0.4 })); return }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ status: 'SUCCEEDED', output: [`http://127.0.0.1:${provider.address().port}/cdn/out.mp4`] }))
+    return
+  }
+  if (req.url.startsWith('/cdn/')) {
+    if (req.headers.range) { res.writeHead(206, { 'content-range': `bytes ${req.headers.range}/0` }); res.end(); return }
+    res.writeHead(200, { 'content-type': 'video/mp4' })
+    res.end(mediaVideo)
+    return
+  }
   if (mode === 'unauthorized') { res.writeHead(401); res.end('{"error":{"message":"smoke unauthorized"}}'); return }
   if (mode === 'rate-limit') { res.writeHead(429); res.end('{"error":{"message":"smoke rate limit"}}'); return }
   if (mode === 'malformed') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{broken'); return }
@@ -49,7 +85,7 @@ const provider = createServer(async (req, res) => {
 async function waitFor(check, label, timeout = 15_000) {
   const end = Date.now() + timeout
   while (Date.now() < end) {
-    const result = check()
+    const result = await check()
     if (result) return result
     await delay(25)
   }
@@ -239,9 +275,9 @@ try {
   assert.deepEqual(await readFile(join(workspaceRoot, reference.path)), fixtureImage)
   assert.deepEqual(board.shots.find(shot => shot.id === firstShot).assetIds, [reference.id])
   assert.equal((await rpc('read_creative_image', { workspaceRoot, id: reference.id })).mime, 'image/png')
-  await assert.rejects(rpc('write_text', { workspaceRoot, path: 'creative/storyboard.json', content: '{}' }), /分镜与素材工具管理/)
-  await assert.rejects(rpc('delete_entry', { workspaceRoot, path: reference.path }), /分镜与素材工具管理/)
-  await assert.rejects(rpc('rename_entry', { workspaceRoot, from: reference.path, to: 'creative/references/renamed.png' }), /分镜与素材工具管理/)
+  await assert.rejects(rpc('write_text', { workspaceRoot, path: 'creative/storyboard.json', content: '{}' }), /分镜与媒体服务管理/)
+  await assert.rejects(rpc('delete_entry', { workspaceRoot, path: reference.path }), /分镜与媒体服务管理/)
+  await assert.rejects(rpc('rename_entry', { workspaceRoot, from: reference.path, to: 'creative/references/renamed.png' }), /分镜与媒体服务管理/)
   const boardExport = await rpc('save_storyboard_export', { workspaceRoot, revision: board.revision })
   const shotSheet = await readFile(join(workspaceRoot, boardExport), 'utf8')
   assert.ok(shotSheet.indexOf('手中车票') < shotSheet.indexOf('月台远景'))
@@ -255,6 +291,61 @@ try {
   assert.deepEqual(await readdir(join(workspaceRoot, 'creative/references')), beforeInvalidImport)
   await assert.rejects(rpc('load_storyboard'), /workspaceRoot/)
   passed.push('storyboard: shots/order, stale-write rejection, local validated image import/preview and ordered export')
+
+  // ---- creative media studio: settings via secrets channel, fake image/video providers, streaming endpoint ----
+  const mediaImage = mediaFixtures
+  let runwayCalls = 0
+  provider.on('request', (req) => { runwayCalls += req.url.startsWith('/vid/v1/') ? 1 : 0 })
+  const mediaPort = provider.address().port
+  await rpc('save_creative_media_settings', { request: {
+    settings: { imageBase: `http://127.0.0.1:${mediaPort}/img`, imageModel: 'fake-image-1', videoBase: `http://127.0.0.1:${mediaPort}/vid` },
+    imageKey: 'sk-image-smoke', videoKey: 'sk-video-smoke',
+  } })
+  const mediaView = await rpc('get_creative_media_settings')
+  assert.equal(mediaView.imageKeyConfigured, true)
+  assert.equal(mediaView.videoKeyConfigured, true)
+  assert.ok(!JSON.stringify(mediaView).includes('sk-image-smoke'), 'keys must never echo back')
+
+  let imageJob = await rpc('generate_creative_media', { workspaceRoot, request: { kind: 'image', shotId: null, sourceId: null, prompt: '雨夜霓虹站台', portrait: true } })
+  assert.equal(imageJob.state, 'submitting')
+  imageJob = await waitFor(async () => {
+    try {
+      const job = await rpc('refresh_creative_media', { workspaceRoot, id: imageJob.id })
+      return job.state === 'ready' ? job : null
+    } catch (error) { if (/正在处理/.test(String(error))) return null; throw error }
+  }, 'image generation to finish')
+  assert.equal(imageJob.asset.format, 'png')
+  assert.deepEqual(await readFile(join(workspaceRoot, `creative/assets/${imageJob.id}.png`)), mediaImage)
+  let mediaResponse = await fetch(`${base}/api/creative-media/${imageJob.id}`, { headers: { host: '127.0.0.1' } })
+  assert.equal(mediaResponse.status, 200)
+  assert.equal(mediaResponse.headers.get('content-type'), 'image/png')
+  assert.deepEqual(Buffer.from(await mediaResponse.arrayBuffer()), mediaImage)
+  mediaResponse = await fetch(`${base}/api/creative-media/${imageJob.id}`, { headers: { host: '127.0.0.1', range: 'bytes=4-7' } })
+  assert.equal(mediaResponse.status, 206)
+  assert.equal(mediaResponse.headers.get('content-range'), `bytes 4-7/${mediaImage.length}`)
+  assert.deepEqual(Buffer.from(await mediaResponse.arrayBuffer()), mediaImage.subarray(4, 8))
+
+  // 图生视频：提交→Waiting→轮询 SUCCEEDED→MP4 落盘→流式端点可读。
+  let videoJob = await rpc('generate_creative_media', { workspaceRoot, request: { kind: 'video', shotId: null, sourceId: imageJob.id, prompt: '镜头推进', duration: 5 } })
+  videoJob = await waitFor(async () => {
+    try {
+      const job = await rpc('refresh_creative_media', { workspaceRoot, id: videoJob.id })
+      return job.state === 'ready' ? job : null
+    } catch (error) { if (/正在处理/.test(String(error))) return null; throw error }
+  }, 'video generation to finish')
+  assert.equal(videoJob.asset.format, 'mp4')
+  assert.deepEqual(await readFile(join(workspaceRoot, `creative/assets/${videoJob.id}.mp4`)), mediaVideo)
+  mediaResponse = await fetch(`${base}/api/creative-media/${videoJob.id}`, { headers: { host: '127.0.0.1' } })
+  assert.equal(mediaResponse.status, 200)
+  assert.equal(mediaResponse.headers.get('content-type'), 'video/mp4')
+  assert.ok(runwayCalls >= 2, 'video used the Runway-compatible route')
+  // 媒体受管路径不可经通用文件命令越权改写（两类作品一致）。
+  await assert.rejects(rpc('write_text', { workspaceRoot, path: `creative/jobs/${imageJob.id}.json`, content: '{}' }), /媒体服务管理/)
+  await assert.rejects(rpc('delete_entry', { workspaceRoot, path: `creative/assets/${imageJob.id}.png` }), /媒体服务管理/)
+  // 其他作品上下文读不到本作品的素材（workspace 绑定）。
+  await assert.rejects(rpc('refresh_creative_media', { workspaceRoot: work.path, id: imageJob.id }), /未找到|已切换/)
+  assert.equal((await fetch(`${base}/api/creative-media/00000000-0000-4000-8000-000000000000`, { headers: { host: '127.0.0.1' } })).status, 404)
+  passed.push('creative media: secrets-channel settings, fake image/video providers, streaming endpoint with ranges, managed-path guard')
 
   mode = 'script-agent'
   await rpc('chat_generate_stream', { streamId: 'script-agent', workspaceRoot, providerId: 'smoke-local', messages: [{ role: 'user', content: '读场次和分场大纲，再给开场建议。' }] })

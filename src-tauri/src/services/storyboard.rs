@@ -11,14 +11,24 @@ const MAX_ASSETS: usize = 500;
 static MUTATION: Mutex<()> = Mutex::new(());
 
 /// Keep generic file actions from bypassing storyboard revisions or deleting source images.
-pub(crate) fn protect_storage(root: &Path, relative: &Path) -> Result<(), String> {
+/// `creative/` holds managed stores for both project kinds: the screenplay storyboard
+/// (`storyboard.json` + `references/`) and the media studio (`board.json` + `jobs/` + `assets/`).
+/// The managed names are protected for every project kind so a novel workspace cannot bypass
+/// media-job bookkeeping through generic file commands either.
+pub(crate) fn protect_storage(relative: &Path) -> Result<(), String> {
   let mut parts = relative.components().filter_map(|part| part.as_os_str().to_str());
   if !parts.next().is_some_and(|part| part.eq_ignore_ascii_case("creative")) {
     return Ok(());
   }
-  let managed = parts.next().is_none_or(|part| part.eq_ignore_ascii_case("storyboard.json") || part.eq_ignore_ascii_case("references"));
-  if managed && super::bookshelf::project_kind(root) == super::bookshelf::ProjectKind::Screenplay {
-    return Err("此目录或文件由分镜与素材工具管理，不能通过普通文件操作改写或删除。".into());
+  let managed = parts.next().is_none_or(|part| {
+    part.eq_ignore_ascii_case("storyboard.json")
+      || part.eq_ignore_ascii_case("references")
+      || part.eq_ignore_ascii_case("board.json")
+      || part.eq_ignore_ascii_case("jobs")
+      || part.eq_ignore_ascii_case("assets")
+  });
+  if managed {
+    return Err("此目录或文件由分镜与媒体服务管理，不能通过普通文件操作改写或删除。".into());
   }
   Ok(())
 }
@@ -414,7 +424,7 @@ mod tests {
     *state.workspace_root.lock().unwrap() = Some(p.0.clone());
     assert!(super::super::fs::write_text_scoped(&state, BOARD_PATH, "{}", None, None).is_err());
     for path in ["creative", BOARD_PATH, "creative/references"] {
-      assert!(super::super::fs::delete_entry_scoped(&state, path, None).unwrap_err().contains("分镜与素材工具管理"));
+      assert!(super::super::fs::delete_entry_scoped(&state, path, None).unwrap_err().contains("分镜与媒体服务管理"));
       assert!(super::super::fs::create_dir_scoped(&state, path, None).is_err());
       assert!(super::super::fs::create_file_scoped(&state, path, None).is_err());
       assert!(super::super::fs::rename_entry_scoped(&state, path, "moved", None).is_err());

@@ -53,15 +53,15 @@
 - 审查范围：未跟踪的 `src-tauri/src/services/creative.rs`（167 行）与 `src-tauri/src/services/creative_media.rs`（569 行），以及 `services/mod.rs`、`Cargo.toml` 的依赖性变更。四个文件 SHA-256 与阶段 0 基线逐一核对一致（`creative_media.rs` 为授权夹具修正后的 `cc12…2c78`），本切片未改动其中任何一行。
 - `creative.rs`：创作台 board 存取（`creative/board.json`，512 KB 上限、BLAKE3 revision 乐观锁、`.write-*.tmp` 原子写）、`managed_dir` 逐级拒绝链接/重解析、`read_limited` 大小限制；自带作用域隔离与 symlink 重定向测试。与分镜的 `creative/storyboard.json` 是不同文件，无覆盖冲突。
 - `creative_media.rs`：图像（OpenAI 兼容）/视频（Runway）生成。密钥全部经 `secrets` 通道，前端只接收 `configured` 布尔值；下载 URL 仅同源或 Runway 官方 CloudFront、禁重定向、MP4 `ftyp` 头校验、24 MB/128 MB 上限、单作品并发 ≤3、跨进程提交中断标 `Interrupted` 不隐式重试。未发现密钥泄漏或日志泄漏。
-- 关键事实：两个服务**完全未接线**——无 RPC 分支、无 Tauri command、无 Agent 工具引用；任何入口都不可触达。它们是早于本变更的半成品（分镜/媒体生成路线），编译与测试通过（4.3 全量 98 项已含其单测）。
+- 关键事实：两个服务原**完全未接线**——无 RPC 分支、无 Tauri command、无 Agent 工具引用；任何入口都不可触达。它们是早于本变更的半成品（分镜/媒体生成路线），编译与测试通过（4.3 全量 98 项已含其单测）。
 - 处置决策（用户确认）：**保持未提交原样**。不纳入本变更、不拆分、不单独提交；待接线时再走独立评审。
-- 遗留缺口（接线前必须补）：`storyboard::protect_storage` 只保护 `creative/storyboard.json` 与 `creative/references`；新服务管理的 `creative/board.json`、`creative/jobs/`、`creative/assets/` 不在普通文件接口保护清单内，接线时需扩展保护并补回归测试。
+- **2026-11-22 已接线落地（用户确认完整接线）**：上述「保持未提交」决策由用户指令解除。8 个 RPC 命令接入 `rpc_dispatch.rs`（`load/save_creative_board`、`list/import/generate/refresh_creative_media`、`get/save_creative_media_settings`）；媒体字节走流式 `GET /api/creative-media/{id}`（origin 校验、Range/206、64 KiB 分块、空文件拒绝）；前端 `api/creative.ts` + `MediaStudio`（小说/剧本均可入口，密钥只显“已配置”）。原遗留缺口（protect_storage 不覆盖 `creative/board.json`/`jobs`/`assets`）已补齐并加回归测试，保护不再区分作品类型，错误文案统一为「分镜与媒体服务管理」。
 
 ## 2026-11-21 文档契约交接（任务 4.6）
 
 - 规划所称 `docs/06`、`docs/08` 在 Iris 不存在；按现存结构映射到 `docs/creative-workflow.md`（数据格式 + 本地工程契约）与 `docs/openspec-comprehensive-iteration.md`（切片交接）。未触碰 Wisteria 任何文件。
 - `creative-workflow.md` 新增「检索与源行定位契约」：命中行号按归一化源行、结果保留提交时词/大小写/范围、过期结果只定位不选词、重复标题锚点去重与第 N 命中定位、围栏内 `#` 不进目录但命中照常标亮、「编辑此处」textarea LF 偏移、滚动依据 `data-source-line` 属性链不按渲染高度猜测；附四层自动化测试入口。
-- 新增「创作台媒体服务（未接线）」小节：明确两服务当前不可触达、密钥经 secrets 按服务地址分键且前端只见布尔值、下载同源/Runway CDN/禁重定向/ftyp 校验、24 MB/128 MB/并发 3 限制、`Interrupted` 不隐式重试；按 AGENTS.md 口径如实写明 macOS/Linux 密钥仅为 Base64 非加密；记录 protect_storage 缺口为接线前置项。
+- 新增「创作台媒体服务」小节（2026-11-22 由「未接线」改写为已接线契约）：接线命令清单、任务生命周期与限额、secrets 分键、下载同源/Runway CDN/禁重定向/ftyp 校验、protect_storage 覆盖与作品类型无关、自动化回归入口；按 AGENTS.md 口径如实写明 macOS/Linux 密钥仅为 Base64 非加密。
 - 字段一致性核对：`MAX_HITS_PER_FILE=20`、`MAX_TOTAL_HITS=300`、`data-source-line`/`data-source-start/end` 属性、DPAPI/Base64 密钥描述均与代码逐一比对一致。既有「编辑器保存与恢复契约」「文件服务安全边界」「版本历史持久化契约」为 4.1–4.3 已交付内容，未改写。
 
 ## 2026-11-21 全量验证交接（任务 4.7，第 4 节完成）

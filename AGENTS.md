@@ -46,6 +46,8 @@ pnpm run tauri:ios:dev
 - **`api/markdown.ts`** - 预览与目录共用的带源行块解析；支持 CRLF、反引号/波浪线围栏和重复标题锚点，检索定位必须使用源行，不能按渲染高度比例猜测
 - **`api/novel.ts`** - 作品内数据层：章节元数据、人物卡、设定集 Codex、情节线、记忆索引、写作历史、章节排序（Markdown/JSON 直读直写，`parseCharacters`/`parsePlotLines`/`parseCodex` 等纯函数有单测）；工坊结果直写章节（`chapterBodyFromResult` 剥 AI 首行标题 + `createChapterWithContent` 落盘登记）
 - **`api/screenplay.ts` / `services/screenplay.rs`** - 剧本场次、场景信息、编排、导出与剧本工坊模板。使用 `workspaceRoot` 绑定剧本 RPC；排序以旧列表为基线，不改场次文件名；剧本 Agent 只读工程参考资料。
+- **`api/storyboard.ts`** - 剧本分镜：镜头/素材 RPC 绑定、参考图导入（魔数校验 + base64 上限）与草稿恢复（`parseStoryboardDraft`）；UI 在 StoryboardDialog（场次绑定、排序不改原稿、导出清单）
+- **`api/creative.ts`** - 媒体工作台：图像/视频生成任务 RPC（`generate_creative_media` 等七个命令）+ 服务设置（密钥走 secrets 通道，浏览器只见“已配置”布尔值）；媒体字节不经 JSON RPC，就绪产物走流式 `GET /api/creative-media/{id}`（Range/206 支持视频拖动）；UI 在 MediaStudio（小说/剧本均可入口）
 - **`api/planner.ts`** - 规划队列：run-queue.md JSON frontmatter 读写 + 大纲→任务链导入（`parseOutlineChapters`/`outlineToTasks`，与旧桌面端格式兼容）；AI 拆解（`buildTaskDraftPrompt`+`parseAiTasks`，id/依赖链重建防 AI 输出不可信字段）；UI 在 ToolsDialog「任务队列」页签（拆解/导入/逐章生成/连续生成）
 - **`api/stylefp.ts`** - 文风指纹持久化（concept/style-fingerprint.json，随工程走）：工坊学习一次全工程共用——StudioDialog 学/存/删，PlannerTab 逐章生成自动携带
 - **`api/lint.ts`** - 正文铁律体检：对齐 novel-ai-lexicon 的规则引擎（一级套路/二级限频/句式模板）
@@ -95,7 +97,7 @@ pnpm run tauri:ios:dev
 - **`desktop.rs`** - 发布启动辅助：前端资源路径校验（不依赖当前工作目录）、仅补迁移旧配置且不覆盖现有设置/密钥/书架、不移动作品文件；含回归单测
 - 模式判断使用 `tauri::is_dev()`，不能使用 `debug_assertions`（`tauri build --debug` 也是打包模式）。Windows 安装不强制切换盘符。
 - **`bin/iris-creation-server.rs`** - 本地 Web 服务端入口：托管 webui 静态资源 + RPC + WS
-- **`server/`** - HTTP/WS 服务：`rpc_dispatch.rs`（66 命令分发分支，72 个命令名含 6 组新旧别名）、WS 升级与 cancel 指令
+- **`server/`** - HTTP/WS 服务：`rpc_dispatch.rs`（88 命令分发分支，157 个命令名含 16 组新旧别名；媒体工作台命令含 `load/save_creative_board`、`list/import/generate/refresh_creative_media`、`get/save_creative_media_settings`）、WS 升级与 cancel 指令；媒体字节走专用流式端点 `GET /api/creative-media/{id}`（Range/206）而非 JSON RPC
 - **桌面启动回归** - `tests/desktop_startup.rs` 验证打包式前端目录、空闲端口启动、health/RPC/SPA/静态资源与资源缺失错误
 - **`commands.rs`** - 命令实现（`*_impl` 共用函数供 Tauri/RPC 双通道调用）
 - **`agent_system.rs`** - AI 代理运行时，包含工具注册表和记忆存储

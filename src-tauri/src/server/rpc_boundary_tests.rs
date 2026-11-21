@@ -175,3 +175,73 @@ async fn media_rpc_rejects_invalid_inputs_before_creating_assets() {
   assert_eq!(p.call("read_creative_image", json!({"id":asset["id"]})).await.unwrap()["mime"], "image/png");
   p.assert_unchanged();
 }
+
+#[tokio::test]
+async fn media_studio_paths_are_protected_for_every_project_kind() {
+  let p = Project::new();
+  // 小说工程（无 .novel/work.json）也必须拦截 creative/ 下受管名字。
+  for path in [
+    "creative/board.json", "creative/jobs/task.json", "creative/assets/pic.png", "creative/jobs", "creative/assets",
+  ] {
+    for (command, args) in file_commands(path).into_iter().filter(|(command, _)| *command != "read_text") {
+      let err = p.call(command, args).await.unwrap_err();
+      assert!(err.contains("媒体服务管理"), "protected {command}: {path}: {err}");
+    }
+  }
+  // 祖先 creative/ 不可经通用文件命令删除或改名。
+  for path in ["creative", "creative/jobs", "creative/assets"] {
+    for (command, args) in file_commands(path).into_iter().filter(|(command, _)| *command != "read_text") {
+      assert!(p.call(command, args).await.is_err(), "ancestor {command}: {path}");
+    }
+  }
+  p.assert_unchanged();
+}
+
+#[tokio::test]
+async fn creative_media_rpc_round_trip_stays_inside_the_open_project() {
+  use base64::{engine::general_purpose::STANDARD, Engine};
+  let p = Project::new();
+  // 无效 base64 / 超限 / 非 PNG：拒绝且不建目录。
+  for encoded in ["not-base64!".to_string(), "A".repeat((crate::services::creative_media::IMPORT_LIMIT + 2) / 3 * 4 + 4)] {
+    assert!(p.call("import_creative_image", json!({"shotId":null,"base64":encoded})).await.is_err());
+    assert!(!p.root.join("creative").exists());
+  }
+  let png = crate::services::local_assets::fixture_png();
+  let job = p.call("import_creative_image", json!({"shotId":null,"base64":STANDARD.encode(&png)})).await.unwrap();
+  let id = job["id"].as_str().unwrap();
+  assert_eq!(job["state"], "ready");
+  let asset_bytes = fs::read(p.root.join(format!("creative/assets/{id}.png"))).unwrap();
+  assert_eq!(asset_bytes, png);
+  // 素材库列出该任务；换工作区根的请求被拒。
+  let library = p.call("list_creative_media", json!({})).await.unwrap();
+  assert_eq!(library["jobs"].as_array().unwrap().len(), 1);
+  let stale = dispatch(&p.ctx, "list_creative_media", json!({"workspaceRoot": p.outside.to_str()})).await;
+  assert!(stale.is_err());
+  // 生成请求用「确定在设置与密钥检查之前」失败的输入：空提示词、超界时长、
+  // 缺参考图的编辑。避免依赖本机是否配置过媒体服务。
+  assert!(p.call("generate_creative_media", json!({"request":{"kind":"image","shotId":null,"sourceId":null,"prompt":"  "}})).await.is_err());
+  assert!(p.call("generate_creative_media", json!({"request":{"kind":"video","shotId":null,"sourceId":null,"prompt":"x","duration":11}})).await.is_err());
+  assert!(p.call("generate_creative_media", json!({"request":{"kind":"edit","shotId":null,"sourceId":null,"prompt":"x"}})).await.is_err());
+  assert_eq!(fs::read_dir(p.root.join("creative/jobs")).unwrap().count(), 1, "no extra job files");
+  // 已就绪的导入任务刷新是幂等的本地读，不触发网络。
+  let refreshed = p.call("refresh_creative_media", json!({"id":id})).await.unwrap();
+  assert_eq!(refreshed["state"], "ready");
+  p.assert_unchanged();
+}
+
+#[tokio::test]
+async fn creative_board_rpc_rejects_bad_revisions_and_shapes() {
+  let p = Project::new();
+  assert_eq!(p.call("load_creative_board", json!({})).await.unwrap(), json!({"revision":null,"board":null}));
+  let saved = p.call("save_creative_board", json!({"revision":null,"board":{"version":1,"title":"夜航"}})).await.unwrap();
+  let revision = saved.as_str().unwrap();
+  assert!(!revision.is_empty());
+  // 过期基线与错误版本都拒绝，磁盘不覆盖。
+  assert!(p.call("save_creative_board", json!({"revision":null,"board":{"version":1}})).await.is_err());
+  assert!(p.call("save_creative_board", json!({"revision":revision,"board":{"version":2}})).await.is_err());
+  let reloaded = p.call("load_creative_board", json!({})).await.unwrap();
+  assert_eq!(reloaded["board"]["title"], json!("夜航"));
+  // 生成/导入不可经 load_creative_board 走旧基线复活。
+  assert!(p.call("save_creative_board", json!({"revision":"deadbeef","board":{"version":1}})).await.is_err());
+  p.assert_unchanged();
+}

@@ -26,6 +26,7 @@ import { SettingsDialog } from './SettingsDialog'
 import { ToolsDialog, type ToolsTab } from './ToolsDialog'
 import { StudioDialog } from './StudioDialog'
 import { StoryboardDialog } from './StoryboardDialog'
+import { MediaStudio } from './MediaStudio'
 import { ChaptersPanel } from './ChaptersPanel'
 import { NewSceneDialog, ScenePanel } from './ScenePanel'
 import { LorePanel } from './LorePanel'
@@ -98,6 +99,7 @@ export function AgentWorkspace() {
   const [toolsTab, setToolsTab] = useState<ToolsTab>(screenplay ? 'search' : 'planner')
   const [studioOpen, setStudioOpen] = useState(false)
   const [storyboardOpen, setStoryboardOpen] = useState(false)
+  const [mediaStudioOpen, setMediaStudioOpen] = useState(false)
   const [studioToolId, setStudioToolId] = useState<string | null>(null)
   /** 编辑器选中文本（选中时显示浮动工坊按钮） */
   const [selection, setSelection] = useState('')
@@ -486,6 +488,7 @@ export function AgentWorkspace() {
     { id: 'new-chapter', icon: screenplay ? 'clapperboard' : 'file-plus', label: screenplay ? '新建场次' : '新建章节', keywords: 'scene chapter 写作', run: () => setDialog({ kind: screenplay ? 'new-scene' : 'new-chapter' }) },
     ...(screenplay ? [{ id: 'scenes', icon: 'list-checks' as const, label: '显示场次列表', keywords: 'screenplay 分场', run: () => { setPanelOpen(true); setPanelTab('chapters') } }] : []),
     ...(screenplay ? [{ id: 'storyboard', icon: 'clapperboard' as const, label: '分镜与素材', keywords: 'storyboard 镜头 图片 人物 场景 道具', run: () => setStoryboardOpen(true) }] : []),
+    { id: 'media-studio', icon: 'sparkles' as const, label: '媒体工作台', keywords: 'media 媒体 图像 视频 生成 image video runway', run: () => setMediaStudioOpen(true) },
     { id: 'new-file', icon: 'file-plus', label: '新建 Markdown 文件', keywords: 'file create', run: () => setDialog({ kind: 'new-file' }) },
     { id: 'new-dir', icon: 'folder-plus', label: '新建目录', keywords: 'folder mkdir', run: () => setDialog({ kind: 'new-dir' }) },
     { id: 'studio', icon: 'sparkles', label: screenplay ? '剧本工坊' : '创作工坊', keywords: 'studio 工坊 创作 头脑风暴 场景 对话 润色 翻译 摘要', run: () => openStudio() },
@@ -674,6 +677,7 @@ export function AgentWorkspace() {
           <Icon name="sparkles" size={16} />
         </button>
         {screenplay ? <button className="agw-iconbtn" title="分镜与素材" onClick={() => setStoryboardOpen(true)}><Icon name="clapperboard" size={17} /></button> : null}
+        <button className="agw-iconbtn" title="媒体工作台" onClick={() => setMediaStudioOpen(true)}><Icon name="sparkles" size={17} /></button>
         <button className="agw-iconbtn" onClick={() => setToolsOpen(true)} title="工具中心">
           <Icon name="wrench" size={17} />
         </button>
@@ -1043,6 +1047,7 @@ export function AgentWorkspace() {
       ) : null}
       {storyboardOpen && screenplay && workRoot ? <StoryboardDialog workspace={workRoot} initialScene={activePath}
         onClose={() => { setStoryboardOpen(false); void refreshTree() }} onOpenScene={navigateToPath} /> : null}
+      {mediaStudioOpen && workRoot ? <MediaStudio workspace={workRoot} onClose={() => setMediaStudioOpen(false)} /> : null}
     </div>
   )
 }
