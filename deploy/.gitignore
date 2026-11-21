@@ -1,0 +1,5 @@
+# 凭据与运行数据不提交
+.env
+htpasswd
+works/
+data/

@@ -1,0 +1,53 @@
+# Iris-Creation 容器化部署（局域网 + Basic Auth）
+#
+# 架构：nginx（8080，Basic Auth + Host 改写 + WS upgrade）→ iris（8765，仅容器网络内可达）
+#
+# 使用：
+#   1. 本机构建产物（二进制 + dist）：
+#        pnpm --dir webui run build
+#        cargo build --manifest-path src-tauri/Cargo.toml --release --bin iris-creation-server
+#   2. 写 deploy/.env（见 deploy/.env.example）
+#   3. cd deploy && docker compose up -d --build
+#   4. 浏览器访问 http://<局域网IP>:8080
+#
+# 安全边界（务必阅读 deploy/README.md）：
+#   - iris RPC 无任何鉴权，nginx Basic Auth 是唯一屏障；不要绕过 nginx 直接发布 8765
+#   - Host/Origin 改写是为了通过 iris 的防 DNS-rebinding 校验，不是缺陷
+#   - 单用户单实例：AppState 全局唯一，不支持多人并发打开不同作品
+#   - 数据全在卷里：works/（作品库）data/（设置/密钥/会话/书架）——备份这两个目录即可
+services:
+  iris:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.iris
+    image: iris-creation:local
+    restart: unless-stopped
+    volumes:
+      - ./works:/works
+      - ./data:/data
+    expose:
+      - "8765"          # 仅容器网络内可达，不映射宿主机端口
+    networks:
+      - irisnet
+
+  proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.proxy
+    image: iris-proxy:local
+    restart: unless-stopped
+    environment:
+      IRIS_AUTH_USER: ${IRIS_AUTH_USER:-iris}
+      IRIS_AUTH_PASSWORD: ${IRIS_AUTH_PASSWORD:?请在 deploy/.env 设置至少 8 位密码}
+    ports:
+      # 局域网部署：绑定宿主机所有网卡。
+      # 若只允许本机访问，把左侧改为 "127.0.0.1:8080"。
+      - "8080:8080"
+    depends_on:
+      - iris
+    networks:
+      - irisnet
+
+networks:
+  irisnet:
+    driver: bridge

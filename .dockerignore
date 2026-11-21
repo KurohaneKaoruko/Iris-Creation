@@ -1,0 +1,19 @@
+# 保持镜像构建上下文最小（逐级放行：父目录被排除时子路径全部不可达）
+*
+!deploy/
+!webui/
+!src-tauri/
+webui/*
+!webui/dist/
+src-tauri/*
+!src-tauri/target/
+src-tauri/target/*
+!src-tauri/target/release/
+src-tauri/target/release/*
+!src-tauri/target/release/iris-creation-server
+# 放行目录下的敏感/无关内容再排除
+deploy/.env
+deploy/works/
+deploy/data/
+deploy/.gitignore
+deploy/.proxy-test-compose.yaml

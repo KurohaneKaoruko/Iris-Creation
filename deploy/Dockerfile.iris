@@ -1,0 +1,41 @@
+# 瘦运行镜像：仅打包 release 二进制 + 前端 dist。
+# 前置条件（本机构建，见 deploy/README.md）：
+#   - src-tauri/target/release/iris-creation-server 已存在且为最新
+#   - webui/dist 已构建
+# release 二进制 ldd 仅 libc/libm/libgcc（tauri GUI 符号未引用，被 --as-needed 裁剪），
+# 因此基础镜像无需 GTK/webkit。
+# 构建上下文 = 仓库根（见 compose.yaml），路径相对仓库根。
+# 基础镜像用 trixie：本机（rolling）编译的二进制最高引用 GLIBC_2.39 符号，
+# bookworm(2.36) 跑不起来，trixie(2.41) 满足。
+FROM debian:trixie-slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/*
+
+# 非特权用户运行
+RUN useradd --system --create-home --uid 1000 iris \
+  && mkdir -p /data /works \
+  && chown iris:iris /data /works
+
+COPY --chown=iris:iris src-tauri/target/release/iris-creation-server /usr/local/bin/iris-creation-server
+# iris 默认 static dir 是 ../webui/dist（相对 CWD），直接放 /opt/iris/webui/dist 并以该目录为 WORKDIR
+COPY --chown=iris:iris webui/dist /opt/iris/webui/dist
+
+WORKDIR /opt/iris
+
+# 数据与作品目录全部走卷：/data（应用数据）/works（作品库）
+VOLUME ["/data", "/works"]
+
+# 启动页目录选择器的默认根 = HOME；指向作品库卷
+ENV IRIS_CREATION_DATA_DIR=/data HOME=/works
+
+USER iris
+EXPOSE 8765
+
+# 绑定 0.0.0.0：容器内无回环浏览器，入口统一走 nginx 服务
+CMD ["iris-creation-server", "--host", "0.0.0.0", "--port", "8765", "--static-dir", "/opt/iris/webui/dist", "--data-dir", "/data"]
+
+# /api/health 无 origin 校验，容器内回环直接探活
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8765/api/health || exit 1
